@@ -1,0 +1,13 @@
+[project]
+name = "hypothesis-workbench"
+version = "0.1.0"
+description = "Local Web3 bug bounty hypothesis workbench"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

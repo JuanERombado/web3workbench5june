@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Hypothesis Workbench</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>Hypothesis Workbench</h1>
+        <p>Local evidence tracker for quick Foundry and Slither hypothesis checks.</p>
+      </div>
+      <div class="status-line">
+        <span>127.0.0.1</span>
+        <span>No external APIs</span>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <section class="setup-pane">
+        <div class="panel">
+          <h2>Target Setup</h2>
+          <form id="target-form">
+            <label>Target name<input name="name" required placeholder="protocol-name" /></label>
+            <label>Repo path<input name="repo_path" required placeholder="C:\path\to\target" /></label>
+            <label>Scope file path<input name="scope_path" required placeholder="C:\path\to\scope.md" /></label>
+            <button type="submit">Create Target</button>
+          </form>
+        </div>
+
+        <div class="panel">
+          <h2>Hypothesis Entry</h2>
+          <form id="hypothesis-form">
+            <label>Target<select name="target" id="target-select" required></select></label>
+            <label>Title<input name="title" required placeholder="Unchecked transfer can drain vault" /></label>
+            <label>Hypothesis<textarea name="description" required rows="7"></textarea></label>
+            <div class="field-grid">
+              <label>Affected file<input name="affected_files" /></label>
+              <label>Affected function<input name="affected_functions" /></label>
+            </div>
+            <div class="field-grid">
+              <label>Attacker role<input name="attacker_role" /></label>
+              <label>Expected impact<input name="expected_impact" /></label>
+            </div>
+            <div class="field-grid">
+              <label>Tool
+                <select name="tool">
+                  <option value="foundry">Foundry</option>
+                  <option value="slither">Slither</option>
+                </select>
+              </label>
+              <label>Command<input name="command" placeholder="mock:foundry:pass" /></label>
+            </div>
+            <button type="submit">Add Hypothesis</button>
+          </form>
+        </div>
+      </section>
+
+      <section class="run-pane">
+        <div class="panel runner">
+          <h2>Tool Runner</h2>
+          <form id="run-form">
+            <label>Hypothesis<select name="hypothesis_id" id="hypothesis-select" required></select></label>
+            <div class="field-grid">
+              <label>Tool
+                <select name="tool">
+                  <option value="foundry">Foundry</option>
+                  <option value="slither">Slither</option>
+                </select>
+              </label>
+              <label>Mock command<input name="command" required value="mock:foundry:pass" /></label>
+            </div>
+            <button type="submit">Run</button>
+          </form>
+          <div id="run-result" class="run-result">No run selected.</div>
+        </div>
+
+        <div class="table-head">
+          <h2>Results</h2>
+          <button id="refresh-button" type="button">Refresh</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Title</th>
+                <th>Tool</th>
+                <th>Tool Status</th>
+                <th>Manual Verdict</th>
+                <th>Last Run</th>
+                <th>Raw Log</th>
+                <th>Decision Notes</th>
+              </tr>
+            </thead>
+            <tbody id="results-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
