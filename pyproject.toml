@@ -1,12 +1,15 @@
 [project]
-name = "hypothesis-workbench"
+name = "web3bb-workbench"
 version = "0.1.0"
-description = "Local Web3 bug bounty hypothesis workbench"
+description = "Local Web3 bug bounty target analysis workbench"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi",
     "uvicorn",
 ]
+
+[project.scripts]
+web3bb = "workbench.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
