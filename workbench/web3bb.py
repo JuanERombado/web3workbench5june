@@ -59,6 +59,17 @@ INSTALL_HINTS = {
     "rust": "winget install Rustlang.Rustup",
     "cargo": "winget install Rustlang.Rustup",
 }
+HYPOTHESIS_STATUSES = [
+    "New",
+    "Needs PoC",
+    "PoC Validated",
+    "Needs Scoped Asset",
+    "Rejected - No Impact",
+    "Rejected - Out of Scope",
+    "Rejected - Known Issue",
+    "Report Candidate",
+    "Submitted",
+]
 
 
 def now_iso() -> str:
@@ -82,7 +93,7 @@ def doctor(output_dir: Path | None = None) -> dict:
         version = ""
         if detected:
             try:
-                proc = subprocess.run(command, capture_output=True, text=True, timeout=10)
+                proc = run_version_command(command)
                 version = first_line(proc.stdout) or first_line(proc.stderr)
             except Exception as exc:  # pragma: no cover - defensive around local tools
                 version = f"version check failed: {exc}"
@@ -99,13 +110,28 @@ def doctor(output_dir: Path | None = None) -> dict:
     return results
 
 
+def run_version_command(command: list[str]) -> subprocess.CompletedProcess:
+    if os.name == "nt":
+        return subprocess.run(
+            subprocess.list2cmdline(command),
+            capture_output=True,
+            text=True,
+            timeout=10,
+            shell=True,
+        )
+    return subprocess.run(command, capture_output=True, text=True, timeout=10)
+
+
 def init_run(target_name: str, program_url: str, zip_path: Path) -> Path:
     run_path = RUNS_ROOT / slugify(target_name) / timestamp()
     for folder in ("input", "scope", "repo", "tool-output", "hypotheses", "poc", "reports", "tracker", "metadata"):
         (run_path / folder).mkdir(parents=True, exist_ok=True)
 
-    archive_dest = run_path / "input" / zip_path.name
-    shutil.copy2(zip_path, archive_dest)
+    input_dest = run_path / "input" / zip_path.name
+    if zip_path.is_dir():
+        shutil.copytree(zip_path, input_dest, dirs_exist_ok=True)
+    else:
+        shutil.copy2(zip_path, input_dest)
     extract_repo(zip_path, run_path / "repo")
 
     metadata = {
@@ -113,6 +139,7 @@ def init_run(target_name: str, program_url: str, zip_path: Path) -> Path:
         "target_slug": slugify(target_name),
         "program_url": program_url,
         "source_zip": str(zip_path.resolve()),
+        "source_input_type": "directory" if zip_path.is_dir() else "zip",
         "created_at": now_iso(),
         "run_path": str(run_path.resolve()),
         "rules": {
@@ -211,49 +238,96 @@ def scope_run(run_path: Path, resource_urls: Iterable[str] = ()) -> Path:
     return path
 
 
-def scan_run(run_path: Path) -> list[dict]:
+def scan_run(run_path: Path, profile: str | None = None, all_profiles: bool = False) -> list[dict]:
     tools = doctor(run_path / "metadata")
     store_tools(run_path, tools)
     project = read_json(run_path / "metadata" / "project_detect.json") if (run_path / "metadata" / "project_detect.json").exists() else ingest_run(run_path)
     repo = run_path / "repo"
-    commands: list[tuple[str, list[str]]] = []
+    selected_profiles = scan_profiles(run_path, profile, all_profiles)
+    commands: list[tuple[str, list[str], str | None]] = []
     if tools.get("forge", {}).get("detected") and project.get("foundry_toml"):
-        commands.append(("forge", ["forge", "build"]))
-        if project.get("test_folders"):
-            commands.append(("forge", ["forge", "test"]))
+        for selected_profile in selected_profiles:
+            commands.append(("forge", ["forge", "build"], selected_profile))
+            if project.get("test_folders"):
+                commands.append(("forge", ["forge", "test"], selected_profile))
     if tools.get("slither", {}).get("detected"):
-        commands.append(("slither", ["slither", ".", "--json", "slither.json"]))
+        for selected_profile in selected_profiles:
+            if selected_profile:
+                commands.append(
+                    (
+                        "slither",
+                        ["slither", ".", "--compile-force-framework", "foundry", "--json", "slither.json"],
+                        selected_profile,
+                    )
+                )
+            else:
+                commands.append(("slither", ["slither", ".", "--json", "slither.json"], None))
     if tools.get("semgrep", {}).get("detected"):
-        commands.append(("semgrep", ["semgrep", "--config", "auto", "--json", "."]))
+        commands.append(("semgrep", ["semgrep", "--config", "auto", "--json", "."], None))
     if tools.get("aderyn", {}).get("detected"):
-        commands.append(("aderyn", ["aderyn", "."]))
+        commands.append(("aderyn", ["aderyn", "."], None))
     if tools.get("surya", {}).get("detected"):
-        commands.append(("surya", ["surya", "describe", "contracts/**/*.sol"]))
+        commands.append(("surya", ["surya", "describe", "contracts/**/*.sol"], None))
     if tools.get("sol2uml", {}).get("detected"):
-        commands.append(("sol2uml", ["sol2uml", "class", "."]))
+        commands.append(("sol2uml", ["sol2uml", "class", "."], None))
 
-    executions = [execute_tool(run_path, repo, tool, command) for tool, command in commands]
+    executions = [
+        execute_tool(
+            run_path,
+            repo,
+            tool,
+            command,
+            profile=selected_profile,
+            env={"FOUNDRY_PROFILE": selected_profile} if selected_profile else None,
+        )
+        for tool, command, selected_profile in commands
+    ]
     return executions
 
 
-def execute_tool(run_path: Path, cwd: Path, tool: str, command: list[str]) -> dict:
+def scan_profiles(run_path: Path, profile: str | None, all_profiles: bool) -> list[str | None]:
+    if profile and all_profiles:
+        raise ValueError("Use either --profile or --all-profiles, not both.")
+    if profile:
+        return [profile]
+    if all_profiles:
+        profiles_path = run_path / "metadata" / "profiles.json"
+        profiles = read_json(profiles_path) if profiles_path.exists() else {}
+        return sorted(profiles) or [None]
+    return [None]
+
+
+def execute_tool(
+    run_path: Path,
+    cwd: Path,
+    tool: str,
+    command: list[str],
+    profile: str | None = None,
+    env: dict[str, str] | None = None,
+) -> dict:
     start = now_iso()
-    out_dir = run_path / "tool-output" / tool / timestamp()
-    out_dir.mkdir(parents=True, exist_ok=True)
+    command_profile = tool_command_profile(command)
+    out_dir = unique_tool_output_dir(run_path, tool, command_profile, profile)
     stdout_path = out_dir / "stdout.txt"
     stderr_path = out_dir / "stderr.txt"
     command_text = " ".join(command)
+    process_env = os.environ.copy()
+    if env:
+        process_env.update(env)
     try:
         proc = subprocess.run(
             command_text if os.name == "nt" else command,
             cwd=cwd,
             capture_output=True,
-            text=True,
+            text=False,
             timeout=600,
             shell=os.name == "nt",
+            env=process_env,
         )
-        stdout = proc.stdout
-        stderr = proc.stderr
+        stdout_bytes = proc.stdout or b""
+        stderr_bytes = proc.stderr or b""
+        stdout = stdout_bytes.decode("utf-8", errors="replace")
+        stderr = stderr_bytes.decode("utf-8", errors="replace")
         exit_code = proc.returncode
     except Exception as exc:
         stdout = ""
@@ -266,6 +340,10 @@ def execute_tool(run_path: Path, cwd: Path, tool: str, command: list[str]) -> di
     record = {
         "tool": tool,
         "command": command_text,
+        "command_args": command,
+        "profile": profile or "",
+        "command_profile": command_profile,
+        "env": env or {},
         "start_time": start,
         "end_time": end,
         "exit_code": exit_code,
@@ -287,23 +365,53 @@ def execute_tool(run_path: Path, cwd: Path, tool: str, command: list[str]) -> di
     return record
 
 
+def unique_tool_output_dir(run_path: Path, tool: str, command_profile: str, profile: str | None = None) -> Path:
+    root = run_path / "tool-output" / tool
+    root.mkdir(parents=True, exist_ok=True)
+    stamp = timestamp()
+    prefix = f"{slugify(profile)}-" if profile else ""
+    counter = 1
+    while True:
+        candidate = root / f"{stamp}-{prefix}{command_profile}-{counter:03d}"
+        try:
+            candidate.mkdir()
+            return candidate
+        except FileExistsError:
+            counter += 1
+
+
+def tool_command_profile(command: list[str]) -> str:
+    if command[:2] == ["forge", "build"]:
+        return "build"
+    if command[:2] == ["forge", "test"]:
+        return "test"
+    if command and command[0] in {"slither", "semgrep", "aderyn", "surya", "sol2uml"}:
+        return command[0]
+    parts = command[1:] or command[:1] or ["command"]
+    raw = "-".join(part.lstrip("-") for part in parts if part)
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", raw).strip("-").lower()
+    return slug[:48] or "command"
+
+
 def add_hypothesis(run_path: Path, values: dict) -> sqlite3.Row:
     with run_db(run_path) as conn:
         ensure_run_schema(conn)
         existing = conn.execute("SELECT COUNT(*) FROM hypotheses").fetchone()[0]
         hypothesis_id = values.get("id") or f"H-{existing + 1:03d}"
         stamp = now_iso()
+        status = validate_hypothesis_status(values.get("status", "New"))
         conn.execute(
             """
             INSERT INTO hypotheses (
-                id, title, target, contract, function, hypothesis, source, tool_evidence,
+                id, status, title, target, contract, function, hypothesis, source, tool_evidence,
                 manual_evidence, scope_mapping, impact_mapping, poc_status, validation_status,
-                known_issue_check, notes, next_action, created_at, updated_at
+                known_issue_check, notes, next_action, closure_notes, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 hypothesis_id,
+                status,
                 values.get("title", hypothesis_id),
                 values.get("target", ""),
                 values.get("contract", ""),
@@ -319,6 +427,7 @@ def add_hypothesis(run_path: Path, values: dict) -> sqlite3.Row:
                 values.get("known_issue_check", ""),
                 values.get("notes", ""),
                 values.get("next_action", ""),
+                values.get("closure_notes", ""),
                 stamp,
                 stamp,
             ),
@@ -360,6 +469,7 @@ def list_hypotheses(run_path: Path) -> list[sqlite3.Row]:
 
 def update_hypothesis(run_path: Path, hypothesis_id: str, values: dict) -> sqlite3.Row:
     allowed = {
+        "status",
         "tool_evidence",
         "manual_evidence",
         "scope_mapping",
@@ -371,6 +481,8 @@ def update_hypothesis(run_path: Path, hypothesis_id: str, values: dict) -> sqlit
         "next_action",
     }
     updates = {k: v for k, v in values.items() if k in allowed and v is not None}
+    if "status" in updates:
+        updates["status"] = validate_hypothesis_status(updates["status"])
     if not updates:
         raise ValueError("No updatable fields were provided.")
     updates["updated_at"] = now_iso()
@@ -384,6 +496,34 @@ def update_hypothesis(run_path: Path, hypothesis_id: str, values: dict) -> sqlit
     if row is None:
         raise ValueError(f"Hypothesis not found: {hypothesis_id}")
     write_hypothesis_md(run_path, row)
+    return row
+
+
+def close_hypothesis(run_path: Path, hypothesis_id: str, status: str, reason: str) -> sqlite3.Row:
+    if not reason.strip():
+        raise ValueError("--reason is required.")
+    status = validate_hypothesis_status(status)
+    stamp = now_iso()
+    note = f"{stamp} - {status}: {reason.strip()}"
+    with run_db(run_path) as conn:
+        ensure_run_schema(conn)
+        row = conn.execute("SELECT * FROM hypotheses WHERE id = ?", (hypothesis_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"Hypothesis not found: {hypothesis_id}")
+        existing = row["closure_notes"] or ""
+        closure_notes = f"{existing.rstrip()}\n{note}".strip() if existing else note
+        conn.execute(
+            """
+            UPDATE hypotheses
+            SET status = ?, closure_notes = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (status, closure_notes, stamp, hypothesis_id),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM hypotheses WHERE id = ?", (hypothesis_id,)).fetchone()
+    append_hypothesis_closure_note(run_path, row, note)
+    export_run(run_path)
     return row
 
 
@@ -444,6 +584,7 @@ def ensure_run_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE TABLE IF NOT EXISTS hypotheses (
             id TEXT PRIMARY KEY,
+            status TEXT NOT NULL DEFAULT 'New',
             title TEXT NOT NULL,
             target TEXT NOT NULL DEFAULT '',
             contract TEXT NOT NULL DEFAULT '',
@@ -459,6 +600,7 @@ def ensure_run_schema(conn: sqlite3.Connection) -> None:
             known_issue_check TEXT NOT NULL DEFAULT '',
             notes TEXT NOT NULL DEFAULT '',
             next_action TEXT NOT NULL DEFAULT '',
+            closure_notes TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -477,6 +619,14 @@ def ensure_run_schema(conn: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL
         );
         """
+    )
+    ensure_columns(
+        conn,
+        "hypotheses",
+        {
+            "status": "TEXT NOT NULL DEFAULT 'New'",
+            "closure_notes": "TEXT NOT NULL DEFAULT ''",
+        },
     )
     conn.commit()
 
@@ -579,6 +729,7 @@ def write_hypothesis_md(run_path: Path, row: sqlite3.Row) -> None:
     data = dict(row)
     lines = [f"# {data['id']} {data.get('title') or ''}".strip(), ""]
     for label, key in [
+        ("Status", "status"),
         ("Target", "target"),
         ("Contract", "contract"),
         ("Function", "function"),
@@ -593,9 +744,28 @@ def write_hypothesis_md(run_path: Path, row: sqlite3.Row) -> None:
         ("Known Issue Check", "known_issue_check"),
         ("Notes", "notes"),
         ("Next Action", "next_action"),
+        ("Closure Notes", "closure_notes"),
     ]:
         lines.extend([f"## {label}", data.get(key, ""), ""])
-    (run_path / "hypotheses" / f"{data['id']}.md").write_text("\n".join(lines), encoding="utf-8")
+    hypotheses_dir = run_path / "hypotheses"
+    hypotheses_dir.mkdir(parents=True, exist_ok=True)
+    (hypotheses_dir / f"{data['id']}.md").write_text("\n".join(lines), encoding="utf-8")
+
+
+def append_hypothesis_closure_note(run_path: Path, row: sqlite3.Row, note: str) -> None:
+    data = dict(row)
+    path = run_path / "hypotheses" / f"{data['id']}.md"
+    if not path.exists():
+        write_hypothesis_md(run_path, row)
+        return
+    text = path.read_text(encoding="utf-8")
+    addition = (
+        "\n\n## Lifecycle Status\n"
+        f"{data.get('status', '')}\n\n"
+        "## Closure Notes\n"
+        f"{note}\n"
+    )
+    path.write_text(text.rstrip() + addition, encoding="utf-8")
 
 
 def write_csv(path: Path, rows: list[dict]) -> None:
@@ -628,6 +798,7 @@ def write_summary(path: Path, rows: list[dict]) -> None:
     lines = ["# Hypothesis Tracker", ""]
     for row in rows:
         lines.append(f"## {row.get('id')} - {row.get('title', '')}")
+        lines.append(f"- Status: {row.get('status', '')}")
         lines.append(f"- Contract: {row.get('contract', '')}")
         lines.append(f"- Function: {row.get('function', '')}")
         lines.append(f"- PoC Status: {row.get('poc_status', '')}")
@@ -661,11 +832,12 @@ def write_run_summary(run_path: Path, path: Path, rows: list[dict]) -> None:
 
 
 def print_table(rows: list[sqlite3.Row]) -> str:
-    headers = ["ID", "Title", "Contract", "PoC", "Validation", "Next Action"]
+    headers = ["ID", "Title", "Status", "Contract", "PoC", "Validation", "Next Action"]
     body = [
         [
             row["id"],
             row["title"],
+            row["status"],
             row["contract"],
             row["poc_status"],
             row["validation_status"],
@@ -685,6 +857,7 @@ def print_table(rows: list[sqlite3.Row]) -> str:
 def hypothesis_fields() -> list[str]:
     return [
         "id",
+        "status",
         "title",
         "target",
         "contract",
@@ -700,9 +873,29 @@ def hypothesis_fields() -> list[str]:
         "known_issue_check",
         "notes",
         "next_action",
+        "closure_notes",
         "created_at",
         "updated_at",
     ]
+
+
+def validate_hypothesis_status(status: str) -> str:
+    cleaned = " / ".join(part.strip() for part in status.split("/") if part.strip())
+    if not cleaned:
+        raise ValueError("Status is required.")
+    parts = [part.strip() for part in cleaned.split("/")]
+    invalid = [part for part in parts if part not in HYPOTHESIS_STATUSES]
+    if invalid:
+        allowed = ", ".join(HYPOTHESIS_STATUSES)
+        raise ValueError(f"Invalid hypothesis status: {', '.join(invalid)}. Allowed: {allowed}")
+    return cleaned
+
+
+def ensure_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
+    existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    for name, definition in columns.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
 
 
 def copy_tree_contents(src: Path, dest: Path) -> None:

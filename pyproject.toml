@@ -11,6 +11,10 @@ dependencies = [
 [project.scripts]
 web3bb = "workbench.cli:main"
 
+[tool.setuptools.packages.find]
+include = ["workbench*"]
+exclude = ["runs*", "workbench_runs*", "tests*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]

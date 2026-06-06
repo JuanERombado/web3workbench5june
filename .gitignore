@@ -1,6 +1,12 @@
 __pycache__/
 .pytest_cache/
 *.py[cod]
+.venv/
+runs/
 workbench.db
-workbench_runs/*
-!workbench_runs/.gitkeep
+workbench_runs/
+*.zip
+foundry-axelarnetwork-*/
+*.sqlite
+tool_versions.json
+*.log

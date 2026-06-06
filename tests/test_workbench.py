@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 import zipfile
 
 from workbench.db import connect
@@ -122,3 +123,237 @@ def test_web3bb_run_ingest_seed_and_export(tmp_path, monkeypatch):
     assert (run_path / "scope" / "scope_brief.md").exists()
     assert Path(exports["csv"]).exists()
     assert Path(exports["xlsx"]).exists()
+
+
+def test_close_hypothesis_sets_lifecycle_status_and_exports(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_path = tmp_path / "run"
+    (run_path / "metadata").mkdir(parents=True)
+    web3bb.write_json(run_path / "metadata" / "run_metadata.json", {"target_name": "Demo", "program_url": ""})
+    hypothesis = web3bb.add_hypothesis(
+        run_path,
+        {
+            "id": "H-001",
+            "title": "Lifecycle",
+            "hypothesis": "Demo",
+            "status": "PoC Validated",
+        },
+    )
+
+    row = web3bb.close_hypothesis(
+        run_path,
+        hypothesis["id"],
+        "Rejected - No Impact / Needs Scoped Asset",
+        "Accounting mismatch validated, but no scoped fee-asymmetric asset was found.",
+    )
+
+    md = (run_path / "hypotheses" / "H-001.md").read_text(encoding="utf-8")
+    tracker = (run_path / "tracker" / "tracker.csv").read_text(encoding="utf-8")
+    summary = (run_path / "tracker" / "summary.md").read_text(encoding="utf-8")
+
+    assert row["status"] == "Rejected - No Impact / Needs Scoped Asset"
+    assert "## Closure Notes" in md
+    assert "Accounting mismatch validated" in md
+    assert "closure_notes" in tracker
+    assert "Rejected - No Impact / Needs Scoped Asset" in tracker
+    assert "- Status: Rejected - No Impact / Needs Scoped Asset" in summary
+
+
+def test_web3bb_init_accepts_source_directory(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    source = tmp_path / "source-dir"
+    (source / "contracts").mkdir(parents=True)
+    (source / "hardhat.config.js").write_text("module.exports = {};\n", encoding="utf-8")
+    (source / "contracts" / "Vault.sol").write_text(
+        """
+        // SPDX-License-Identifier: MIT
+        pragma solidity ^0.8.19;
+        contract Vault {}
+        """,
+        encoding="utf-8",
+    )
+
+    run_path = web3bb.init_run("Directory Target", "https://example.com/program", source)
+    project = web3bb.ingest_run(run_path)
+
+    assert (run_path / "input" / "source-dir" / "hardhat.config.js").exists()
+    assert (run_path / "repo" / "hardhat.config.js").exists()
+    assert (run_path / "repo" / "contracts" / "Vault.sol").exists()
+    assert project["project_type"] == "hardhat"
+    assert "^0.8.19" in project["solidity_versions"]
+
+
+def test_doctor_runs_windows_cmd_wrappers_with_shell(tmp_path, monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(web3bb, "DOCTOR_TOOLS", {"npm": ["npm", "--version"]})
+    monkeypatch.setattr(web3bb.os, "name", "nt")
+    monkeypatch.setattr(web3bb.shutil, "which", lambda exe: f"C:\\Tools\\{exe}.CMD")
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, stdout="10.0.0\n", stderr="")
+
+    monkeypatch.setattr(web3bb.subprocess, "run", fake_run)
+
+    result = web3bb.doctor(tmp_path)
+
+    assert result["npm"]["detected"] is True
+    assert result["npm"]["version"] == "10.0.0"
+    assert calls == [
+        (
+            "npm --version",
+            {"capture_output": True, "text": True, "timeout": 10, "shell": True},
+        )
+    ]
+
+
+def test_execute_tool_decodes_invalid_bytes_and_none_stderr(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 1, stdout=b"ok\xffbad\x80\n", stderr=None)
+
+    monkeypatch.setattr(web3bb.subprocess, "run", fake_run)
+
+    run_path = tmp_path / "run"
+    cwd = tmp_path / "repo"
+    cwd.mkdir(parents=True)
+
+    record = web3bb.execute_tool(run_path, cwd, "fake-tool", ["fake-tool", "--version"])
+
+    stdout_text = Path(record["stdout_path"]).read_text(encoding="utf-8")
+    stderr_text = Path(record["stderr_path"]).read_text(encoding="utf-8")
+
+    assert record["exit_code"] == 1
+    assert "ok" in stdout_text
+    assert "bad" in stdout_text
+    assert "\ufffd" in stdout_text
+    assert stderr_text == ""
+    assert calls[0][1]["text"] is False
+
+
+def test_execute_tool_uses_unique_output_dirs_in_same_second(tmp_path, monkeypatch):
+    outputs = [b"first\n", b"second\n"]
+
+    monkeypatch.setattr(web3bb, "timestamp", lambda: "20260606T153942Z")
+
+    def fake_run(command, **kwargs):
+        return subprocess.CompletedProcess(command, 0, stdout=outputs.pop(0), stderr=b"")
+
+    monkeypatch.setattr(web3bb.subprocess, "run", fake_run)
+
+    run_path = tmp_path / "run"
+    cwd = tmp_path / "repo"
+    cwd.mkdir(parents=True)
+
+    first = web3bb.execute_tool(run_path, cwd, "forge", ["forge", "build"])
+    second = web3bb.execute_tool(run_path, cwd, "forge", ["forge", "build"])
+
+    first_stdout = Path(first["stdout_path"])
+    second_stdout = Path(second["stdout_path"])
+
+    assert first_stdout.parent != second_stdout.parent
+    assert first_stdout.parent.name == "20260606T153942Z-build-001"
+    assert second_stdout.parent.name == "20260606T153942Z-build-002"
+    assert first_stdout.read_text(encoding="utf-8") == "first\n"
+    assert second_stdout.read_text(encoding="utf-8") == "second\n"
+    assert first["profile"] == ""
+    assert first["command_profile"] == "build"
+    assert first["command_args"] == ["forge", "build"]
+
+
+def test_tool_command_profile_uses_stable_short_known_names():
+    assert web3bb.tool_command_profile(["forge", "build"]) == "build"
+    assert web3bb.tool_command_profile(["forge", "test"]) == "test"
+    assert web3bb.tool_command_profile(["slither", ".", "--compile-force-framework", "foundry"]) == "slither"
+    assert web3bb.tool_command_profile(["semgrep", "--config", "auto", "--json", "."]) == "semgrep"
+    assert web3bb.tool_command_profile(["aderyn", "."]) == "aderyn"
+    assert web3bb.tool_command_profile(["surya", "describe", "contracts/**/*.sol"]) == "surya"
+    assert web3bb.tool_command_profile(["sol2uml", "class", "."]) == "sol2uml"
+
+
+def test_execute_tool_records_foundry_profile_in_folder_json_and_env(tmp_path, monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(web3bb, "timestamp", lambda: "20260606T153942Z")
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, stdout=b"profiled\n", stderr=b"")
+
+    monkeypatch.setattr(web3bb.subprocess, "run", fake_run)
+
+    run_path = tmp_path / "run"
+    cwd = tmp_path / "repo"
+    cwd.mkdir(parents=True)
+
+    record = web3bb.execute_tool(
+        run_path,
+        cwd,
+        "forge",
+        ["forge", "build"],
+        profile="mainnet",
+        env={"FOUNDRY_PROFILE": "mainnet"},
+    )
+    execution = web3bb.read_json(Path(record["stdout_path"]).parent / "execution.json")
+
+    assert Path(record["stdout_path"]).parent.name == "20260606T153942Z-mainnet-build-001"
+    assert record["profile"] == "mainnet"
+    assert execution["profile"] == "mainnet"
+    assert execution["command_profile"] == "build"
+    assert execution["env"] == {"FOUNDRY_PROFILE": "mainnet"}
+    assert calls[0][1]["env"]["FOUNDRY_PROFILE"] == "mainnet"
+
+
+def test_scan_all_profiles_runs_profiled_foundry_and_slither(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_path = tmp_path / "run"
+    (run_path / "metadata").mkdir(parents=True)
+    (run_path / "repo").mkdir()
+    web3bb.write_json(
+        run_path / "metadata" / "project_detect.json",
+        {"foundry_toml": ["foundry.toml"], "test_folders": ["test"]},
+    )
+    web3bb.write_json(run_path / "metadata" / "profiles.json", {"default": {}, "lite": {}})
+
+    monkeypatch.setattr(
+        web3bb,
+        "doctor",
+        lambda output_dir=None: {
+            "forge": {"detected": True, "version": "", "path": "", "install_hint": ""},
+            "slither": {"detected": True, "version": "", "path": "", "install_hint": ""},
+        },
+    )
+    monkeypatch.setattr(web3bb, "store_tools", lambda run_path, tools: None)
+
+    calls = []
+
+    def fake_execute(run_path_arg, cwd, tool, command, profile=None, env=None):
+        calls.append({"tool": tool, "command": command, "profile": profile, "env": env})
+        return calls[-1]
+
+    monkeypatch.setattr(web3bb, "execute_tool", fake_execute)
+
+    executions = web3bb.scan_run(run_path, all_profiles=True)
+
+    assert executions == calls
+    assert calls == [
+        {"tool": "forge", "command": ["forge", "build"], "profile": "default", "env": {"FOUNDRY_PROFILE": "default"}},
+        {"tool": "forge", "command": ["forge", "test"], "profile": "default", "env": {"FOUNDRY_PROFILE": "default"}},
+        {"tool": "forge", "command": ["forge", "build"], "profile": "lite", "env": {"FOUNDRY_PROFILE": "lite"}},
+        {"tool": "forge", "command": ["forge", "test"], "profile": "lite", "env": {"FOUNDRY_PROFILE": "lite"}},
+        {
+            "tool": "slither",
+            "command": ["slither", ".", "--compile-force-framework", "foundry", "--json", "slither.json"],
+            "profile": "default",
+            "env": {"FOUNDRY_PROFILE": "default"},
+        },
+        {
+            "tool": "slither",
+            "command": ["slither", ".", "--compile-force-framework", "foundry", "--json", "slither.json"],
+            "profile": "lite",
+            "env": {"FOUNDRY_PROFILE": "lite"},
+        },
+    ]

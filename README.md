@@ -103,6 +103,13 @@ Creates a manually editable `scope/scope_brief.md` with sections for program URL
 web3bb scan --run runs/my-target/<timestamp>
 ```
 
+Profile-aware Foundry scans:
+
+```powershell
+web3bb scan --run runs/my-target/<timestamp> --profile default
+web3bb scan --run runs/my-target/<timestamp> --all-profiles
+```
+
 Runs available tools only:
 
 - `forge build` when Foundry exists
@@ -114,6 +121,8 @@ Runs available tools only:
 - `sol2uml` when available
 
 Each execution records command, start/end time, exit code, stdout path, stderr path, and a short parsed summary. One failing tool does not fail the whole scan.
+
+When a profile is selected, Foundry and Slither executions receive `FOUNDRY_PROFILE=<profile>`. Profiled Slither uses `slither . --compile-force-framework foundry --json slither.json`.
 
 ### Add Or Update Hypotheses
 

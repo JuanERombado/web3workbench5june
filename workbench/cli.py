@@ -57,6 +57,8 @@ def main() -> None:
 
     scan = subparsers.add_parser("scan")
     scan.add_argument("--run", required=True)
+    scan.add_argument("--profile")
+    scan.add_argument("--all-profiles", action="store_true")
 
     add = subparsers.add_parser("add-hypothesis")
     add.add_argument("--run")
@@ -73,6 +75,7 @@ def main() -> None:
     add.add_argument("--manual-evidence", default="")
     add.add_argument("--scope-mapping", default="")
     add.add_argument("--impact-mapping", default="")
+    add.add_argument("--status", default="New", choices=web3bb.HYPOTHESIS_STATUSES)
     add.add_argument("--poc-status", default="Needs PoC")
     add.add_argument("--validation-status", default="Unvalidated")
     add.add_argument("--known-issue-check", default="")
@@ -85,6 +88,7 @@ def main() -> None:
     update = subparsers.add_parser("update-hypothesis")
     update.add_argument("--run", required=True)
     update.add_argument("--id", required=True)
+    update.add_argument("--status")
     update.add_argument("--tool-evidence")
     update.add_argument("--manual-evidence")
     update.add_argument("--scope-mapping")
@@ -97,6 +101,12 @@ def main() -> None:
 
     export = subparsers.add_parser("export")
     export.add_argument("--run", required=True)
+
+    close = subparsers.add_parser("close-hypothesis")
+    close.add_argument("--run", required=True)
+    close.add_argument("--id", required=True)
+    close.add_argument("--status", required=True)
+    close.add_argument("--reason", required=True)
 
     seed = subparsers.add_parser("seed-axelar")
     seed.add_argument("--run", required=True)
@@ -119,7 +129,9 @@ def main() -> None:
         print_json({"scope_brief": str(path)})
         return
     if args.command_name == "scan":
-        executions = web3bb.scan_run(Path(args.run))
+        if args.profile and args.all_profiles:
+            parser.error("scan accepts either --profile or --all-profiles, not both")
+        executions = web3bb.scan_run(Path(args.run), profile=args.profile, all_profiles=args.all_profiles)
         print_json({"executions": executions})
         return
     if args.command_name == "add-hypothesis" and args.run:
@@ -136,6 +148,10 @@ def main() -> None:
         return
     if args.command_name == "update-hypothesis":
         row = web3bb.update_hypothesis(Path(args.run), args.id, update_args(args))
+        print_json(dict(row))
+        return
+    if args.command_name == "close-hypothesis":
+        row = web3bb.close_hypothesis(Path(args.run), args.id, args.status, args.reason)
         print_json(dict(row))
         return
     if args.command_name == "export":
@@ -182,6 +198,7 @@ def hypothesis_args(args) -> dict:
         "manual_evidence": args.manual_evidence,
         "scope_mapping": args.scope_mapping,
         "impact_mapping": args.impact_mapping,
+        "status": args.status,
         "poc_status": args.poc_status,
         "validation_status": args.validation_status,
         "known_issue_check": args.known_issue_check,
@@ -192,6 +209,7 @@ def hypothesis_args(args) -> dict:
 
 def update_args(args) -> dict:
     return {
+        "status": args.status,
         "tool_evidence": args.tool_evidence,
         "manual_evidence": args.manual_evidence,
         "scope_mapping": args.scope_mapping,
