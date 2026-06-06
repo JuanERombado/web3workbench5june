@@ -37,6 +37,7 @@ web3bb ingest --run runs/axelar/<timestamp>
 web3bb scope --run runs/axelar/<timestamp>
 web3bb scan --run runs/axelar/<timestamp>
 web3bb seed-axelar --run runs/axelar/<timestamp>
+web3bb import-leads --run runs/axelar/<timestamp> --file leads.csv
 web3bb export --run runs/axelar/<timestamp>
 ```
 
@@ -151,6 +152,52 @@ web3bb update-hypothesis --run runs/my-target/<timestamp> --id H-001 --poc-statu
 ```
 
 Hypotheses are stored in `metadata/web3bb.sqlite` and mirrored as Markdown files under `hypotheses/`.
+
+### Import Leads
+
+```powershell
+web3bb import-leads --run runs/my-target/<timestamp> --file leads.csv
+web3bb import-leads --run runs/my-target/<timestamp> --file leads.md
+web3bb export --run runs/my-target/<timestamp>
+```
+
+CSV imports support these columns:
+
+```text
+title,target,contract,function,hypothesis,source,tool_evidence,manual_evidence,scope_mapping,impact_mapping,poc_status,validation_status,known_issue_check,notes,next_action
+```
+
+Markdown imports use one or more `# Title` leads with simple sections:
+
+```markdown
+# Oracle stale price
+
+## Contract
+OracleVault
+
+## Function
+withdraw
+
+## Hypothesis
+Withdraw may use stale oracle data.
+
+## Source
+Manual review
+
+## Evidence
+Trace notes or tool evidence summary.
+
+## Scope Mapping
+In-scope vault.
+
+## Impact Mapping
+Direct loss of funds.
+
+## Next Action
+Build Foundry PoC.
+```
+
+Imported leads become normal hypotheses with `H-###` IDs and are mirrored into the tracker exports.
 
 ### Seed Axelar Sample
 

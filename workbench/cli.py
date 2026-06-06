@@ -85,6 +85,10 @@ def main() -> None:
     list_h = subparsers.add_parser("list-hypotheses")
     list_h.add_argument("--run", required=True)
 
+    import_leads = subparsers.add_parser("import-leads")
+    import_leads.add_argument("--run", required=True)
+    import_leads.add_argument("--file", required=True)
+
     update = subparsers.add_parser("update-hypothesis")
     update.add_argument("--run", required=True)
     update.add_argument("--id", required=True)
@@ -145,6 +149,10 @@ def main() -> None:
         return
     if args.command_name == "list-hypotheses":
         print(web3bb.print_table(web3bb.list_hypotheses(Path(args.run))))
+        return
+    if args.command_name == "import-leads":
+        rows = web3bb.import_leads(Path(args.run), Path(args.file))
+        print_json(rows)
         return
     if args.command_name == "update-hypothesis":
         row = web3bb.update_hypothesis(Path(args.run), args.id, update_args(args))

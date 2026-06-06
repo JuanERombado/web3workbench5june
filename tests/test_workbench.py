@@ -159,6 +159,83 @@ def test_close_hypothesis_sets_lifecycle_status_and_exports(tmp_path, monkeypatc
     assert "- Status: Rejected - No Impact / Needs Scoped Asset" in summary
 
 
+def test_import_leads_from_csv_defaults_and_exports(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_path = tmp_path / "run"
+    (run_path / "metadata").mkdir(parents=True)
+    web3bb.write_json(run_path / "metadata" / "run_metadata.json", {"target_name": "Demo", "program_url": ""})
+    leads = tmp_path / "leads.csv"
+    leads.write_text(
+        "title,target,contract,function,hypothesis,source,next_action\n"
+        "Oracle stale price,Demo,OracleVault,withdraw,Withdraw may use stale price,Manual,Build PoC\n"
+        "Allowance drift,Demo,Token,,Allowance may be reused,,Review approvals\n",
+        encoding="utf-8",
+    )
+
+    rows = web3bb.import_leads(run_path, leads)
+
+    assert [row["id"] for row in rows] == ["H-001", "H-002"]
+    assert rows[0]["title"] == "Oracle stale price"
+    assert rows[0]["poc_status"] == "Needs PoC"
+    assert rows[0]["validation_status"] == "Unvalidated"
+    assert rows[1]["source"] == "Manual"
+    assert (run_path / "hypotheses" / "H-001.md").exists()
+    tracker = (run_path / "tracker" / "tracker.csv").read_text(encoding="utf-8")
+    assert "Oracle stale price" in tracker
+    assert "Allowance drift" in tracker
+
+
+def test_import_leads_from_markdown_sections(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_path = tmp_path / "run"
+    (run_path / "metadata").mkdir(parents=True)
+    web3bb.write_json(run_path / "metadata" / "run_metadata.json", {"target_name": "Demo", "program_url": ""})
+    leads = tmp_path / "leads.md"
+    leads.write_text(
+        """# Reimbursement mismatch
+
+## Contract
+Bridge
+
+## Function
+execute
+
+## Hypothesis
+Executor may be reimbursed too much.
+
+## Source
+Manual notes
+
+## Evidence
+Trace shows amount mismatch.
+
+## Scope Mapping
+Bridge is in scope.
+
+## Impact Mapping
+Direct loss if exploitable.
+
+## Next Action
+Write Foundry test.
+""",
+        encoding="utf-8",
+    )
+
+    rows = web3bb.import_leads(run_path, leads)
+
+    assert len(rows) == 1
+    assert rows[0]["id"] == "H-001"
+    assert rows[0]["title"] == "Reimbursement mismatch"
+    assert rows[0]["contract"] == "Bridge"
+    assert rows[0]["function"] == "execute"
+    assert rows[0]["hypothesis"] == "Executor may be reimbursed too much."
+    assert rows[0]["source"] == "Manual notes"
+    assert rows[0]["manual_evidence"] == "Trace shows amount mismatch."
+    assert rows[0]["scope_mapping"] == "Bridge is in scope."
+    assert rows[0]["impact_mapping"] == "Direct loss if exploitable."
+    assert rows[0]["next_action"] == "Write Foundry test."
+
+
 def test_web3bb_init_accepts_source_directory(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     source = tmp_path / "source-dir"

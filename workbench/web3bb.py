@@ -438,6 +438,106 @@ def add_hypothesis(run_path: Path, values: dict) -> sqlite3.Row:
     return row
 
 
+def import_leads(run_path: Path, file_path: Path) -> list[sqlite3.Row]:
+    if not file_path.exists():
+        raise ValueError(f"Lead file not found: {file_path}")
+    suffix = file_path.suffix.lower()
+    if suffix == ".csv":
+        leads = parse_csv_leads(file_path)
+    elif suffix == ".md":
+        leads = parse_markdown_leads(file_path)
+    else:
+        raise ValueError("Lead import accepts only .csv and .md files.")
+    imported = [add_hypothesis(run_path, lead) for lead in leads]
+    export_run(run_path)
+    return imported
+
+
+def parse_csv_leads(file_path: Path) -> list[dict]:
+    with file_path.open(newline="", encoding="utf-8-sig") as handle:
+        reader = csv.DictReader(handle)
+        if not reader.fieldnames:
+            raise ValueError("CSV lead file must include a header row.")
+        leads = [normalize_lead_values(row) for row in reader]
+    return [lead for lead in leads if lead.get("title") or lead.get("hypothesis")]
+
+
+def parse_markdown_leads(file_path: Path) -> list[dict]:
+    text = file_path.read_text(encoding="utf-8")
+    chunks = split_markdown_leads(text)
+    leads = []
+    for title, body in chunks:
+        sections = markdown_sections(body)
+        lead = normalize_lead_values(
+            {
+                "title": title,
+                "contract": sections.get("contract", ""),
+                "function": sections.get("function", ""),
+                "hypothesis": sections.get("hypothesis", ""),
+                "source": sections.get("source", ""),
+                "manual_evidence": sections.get("evidence", ""),
+                "scope_mapping": sections.get("scope mapping", ""),
+                "impact_mapping": sections.get("impact mapping", ""),
+                "next_action": sections.get("next action", ""),
+            }
+        )
+        if lead.get("title") or lead.get("hypothesis"):
+            leads.append(lead)
+    return leads
+
+
+def split_markdown_leads(text: str) -> list[tuple[str, str]]:
+    matches = list(re.finditer(r"(?m)^# (.+?)\s*$", text))
+    if not matches:
+        return [("Untitled lead", text)]
+    chunks = []
+    for idx, match in enumerate(matches):
+        start = match.end()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+        chunks.append((match.group(1).strip(), text[start:end]))
+    return chunks
+
+
+def markdown_sections(text: str) -> dict[str, str]:
+    sections: dict[str, list[str]] = {}
+    current = ""
+    for line in text.splitlines():
+        match = re.match(r"^##\s+(.+?)\s*$", line)
+        if match:
+            current = match.group(1).strip().lower()
+            sections.setdefault(current, [])
+            continue
+        if current:
+            sections[current].append(line)
+    return {key: "\n".join(value).strip() for key, value in sections.items()}
+
+
+def normalize_lead_values(values: dict) -> dict:
+    allowed = {
+        "title",
+        "target",
+        "contract",
+        "function",
+        "hypothesis",
+        "source",
+        "tool_evidence",
+        "manual_evidence",
+        "scope_mapping",
+        "impact_mapping",
+        "poc_status",
+        "validation_status",
+        "known_issue_check",
+        "notes",
+        "next_action",
+    }
+    normalized = {key: clean_cell(values.get(key, "")) for key in allowed}
+    normalized["source"] = normalized["source"] or "Manual"
+    normalized["poc_status"] = normalized["poc_status"] or "Needs PoC"
+    normalized["validation_status"] = normalized["validation_status"] or "Unvalidated"
+    normalized["status"] = "New"
+    return normalized
+
+
 def seed_axelar(run_path: Path) -> sqlite3.Row:
     return add_hypothesis(
         run_path,
@@ -937,6 +1037,10 @@ def first_matching_line(value: str, needle: str) -> str:
         if needle.lower() in line.lower():
             return line.strip()
     return ""
+
+
+def clean_cell(value: object) -> str:
+    return "" if value is None else str(value).strip()
 
 
 def write_json(path: Path, value: object) -> None:
