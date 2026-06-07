@@ -1,6 +1,6 @@
-# Web3 Bug Bounty CLI Workbench
+# Web3 Bug Bounty Workbench
 
-`web3bb` is a local-first CLI for turning a Web3 bounty target and a Foundry or Hardhat repo zip into a repeatable audit run.
+`web3bb` is a local-first workbench for turning a Web3 bounty target and a Foundry or Hardhat repo zip/folder into a repeatable audit run. It includes the CLI, a localhost browser UI, and an experimental Windows desktop GUI.
 
 The MVP does not submit transactions, does not install tools for you, and does not claim vulnerabilities automatically. It detects what is already available, runs what it can, records evidence, and keeps hypotheses reviewable by a human.
 
@@ -16,8 +16,19 @@ You can then run either:
 
 ```powershell
 web3bb --help
+web3bb-web
+web3bb-gui
 python -m workbench --help
+python -m workbench.gui
 ```
+
+The recommended UI is the local browser app:
+
+```powershell
+web3bb-web
+```
+
+It starts FastAPI on `http://127.0.0.1:8765` and opens that URL in your browser. It wraps the same local pipeline as the CLI: create runs, ingest repos, edit scope notes, run doctor, scan, import/gate/close hypotheses, and export review packets. It does not use AI agents, paid API calls, cloud sync, or OpenAI integration.
 
 ## Safety Rules
 
@@ -40,6 +51,42 @@ web3bb seed-axelar --run runs/axelar/<timestamp>
 web3bb import-leads --run runs/axelar/<timestamp> --file leads.csv
 web3bb export --run runs/axelar/<timestamp>
 ```
+
+## Local Browser UI
+
+Start the local web app with:
+
+```powershell
+web3bb-web
+```
+
+Open:
+
+```text
+http://127.0.0.1:8765
+```
+
+The browser UI includes:
+
+- Dashboard for existing runs and review packet export.
+- New Target page for target metadata and zip/folder source selection.
+- Tool Doctor page for local tool detection and `tool_versions.json`.
+- Scope page for editing `scope/scope_brief.md`.
+- Scan page for generic, selected-profile, and all-profile scans.
+- Hypotheses page for add/import/gate/close workflows.
+- Review Packet page for `review_packet/chatgpt_packet.md` with copy-to-clipboard.
+
+The app binds to `127.0.0.1` only and uses the existing run folders plus SQLite DB under each run.
+
+## Windows Desktop GUI
+
+Start the app with:
+
+```powershell
+web3bb-gui
+```
+
+The PySide6 desktop app is still present but no longer the primary UI path.
 
 ## Commands
 
@@ -199,6 +246,27 @@ Build Foundry PoC.
 
 Imported leads become normal hypotheses with `H-###` IDs and are mirrored into the tracker exports.
 
+### Gate Or Close Hypotheses
+
+```powershell
+web3bb gate-hypothesis --run runs/my-target/<timestamp> --id H-001 --decision "Needs manual review" --notes "Scope mapping is incomplete"
+web3bb close-hypothesis --run runs/my-target/<timestamp> --id H-001 --status "Rejected - No Impact" --reason "PoC showed no recoverable value"
+```
+
+Lifecycle statuses:
+
+```text
+New
+Needs PoC
+PoC Validated
+Needs Scoped Asset
+Rejected - No Impact
+Rejected - Out of Scope
+Rejected - Known Issue
+Report Candidate
+Submitted
+```
+
 ### Seed Axelar Sample
 
 ```powershell
@@ -211,6 +279,7 @@ Adds the sample Axelar ITS express execution reimbursement mismatch hypothesis w
 
 ```powershell
 web3bb export --run runs/my-target/<timestamp>
+web3bb export-review-packet --run runs/my-target/<timestamp>
 ```
 
 Writes:
@@ -220,6 +289,18 @@ Writes:
 - `tracker/summary.md`
 - `tracker/tool_versions.json`
 - `tracker/run_summary.md`
+
+`export-review-packet` creates `review_packet/` with scope notes, tracker exports, metadata, hypothesis markdown, selected tool output files, PoC notes, and `review_packet/chatgpt_packet.md`.
+
+## Building A Windows EXE
+
+PyInstaller packaging prep is included:
+
+```powershell
+.\scripts\build_exe.ps1
+```
+
+The script installs the editable package, installs PyInstaller, and builds a windowed executable under `dist\Web3 Bug Bounty Workbench\`.
 
 ## Bringing Results Back To ChatGPT Or A Manual Reviewer
 

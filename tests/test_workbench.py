@@ -4,7 +4,10 @@ from pathlib import Path
 import subprocess
 import zipfile
 
+from fastapi.testclient import TestClient
+
 from workbench.db import connect
+from workbench.app import app
 from workbench import services
 from workbench import web3bb
 from workbench.services import (
@@ -234,6 +237,93 @@ Write Foundry test.
     assert rows[0]["scope_mapping"] == "Bridge is in scope."
     assert rows[0]["impact_mapping"] == "Direct loss if exploitable."
     assert rows[0]["next_action"] == "Write Foundry test."
+
+
+def test_export_review_packet_collects_review_artifacts(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_path = tmp_path / "run"
+    for folder in ("metadata", "scope", "tracker", "hypotheses", "poc", "tool-output", "repo"):
+        (run_path / folder).mkdir(parents=True)
+    web3bb.write_json(
+        run_path / "metadata" / "run_metadata.json",
+        {"target_name": "Demo", "program_url": "https://example.com/program", "created_at": "2026-06-07T00:00:00+00:00"},
+    )
+    web3bb.write_json(run_path / "scope" / "resources.json", {"urls": ["https://example.com/program", "https://example.com/scope"]})
+    web3bb.write_json(run_path / "metadata" / "project_detect.json", {"project_type": "foundry"})
+    web3bb.write_json(run_path / "metadata" / "profiles.json", {"default": {}})
+    web3bb.write_json(run_path / "metadata" / "tool_versions.json", {})
+    (run_path / "scope" / "scope_brief.md").write_text("# Scope Brief\n", encoding="utf-8")
+    (run_path / "poc" / "note.md").write_text("# PoC note\n", encoding="utf-8")
+
+    first = web3bb.add_hypothesis(run_path, {"title": "Current", "hypothesis": "Still active", "next_action": "Review"})
+    second = web3bb.add_hypothesis(run_path, {"title": "Closed", "hypothesis": "No impact"})
+    web3bb.close_hypothesis(run_path, second["id"], "Rejected - No Impact", "No recoverable value.")
+
+    out_dir = run_path / "tool-output" / "forge" / "20260607T000000Z-build-001"
+    out_dir.mkdir(parents=True)
+    stdout = out_dir / "stdout.txt"
+    stderr = out_dir / "stderr.txt"
+    stdout.write_text("forge ok\n", encoding="utf-8")
+    stderr.write_text("", encoding="utf-8")
+    web3bb.write_json(out_dir / "execution.json", {"tool": "forge"})
+    with web3bb.run_db(run_path) as conn:
+        web3bb.ensure_run_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO tool_executions (tool, command, start_time, end_time, exit_code, stdout_path, stderr_path, parsed_summary)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("forge", "forge build", "start", "end", 0, str(stdout), str(stderr), "forge completed successfully."),
+        )
+        conn.commit()
+
+    result = web3bb.export_review_packet(run_path)
+    packet = Path(result["review_packet"])
+    packet_md = Path(result["chatgpt_packet"])
+
+    assert (packet / "scope" / "scope_brief.md").exists()
+    assert (packet / "tracker" / "tracker.csv").exists()
+    assert (packet / "hypotheses" / first["id"]).with_suffix(".md").exists()
+    assert (packet / "poc" / "note.md").exists()
+    assert (packet / "tool-output" / "forge" / "20260607T000000Z-build-001" / "stdout.txt").exists()
+    text = packet_md.read_text(encoding="utf-8")
+    assert "Current Hypotheses" in text
+    assert "Closed Or Rejected Hypotheses" in text
+    assert "forge completed successfully" in text
+    assert "forge ok" in text
+
+
+def test_web_health_route():
+    client = TestClient(app)
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert response.json()["local"] == "127.0.0.1"
+
+
+def test_web_review_packet_route_exports_packet(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    client = TestClient(app)
+    run_path = tmp_path / "run"
+    (run_path / "metadata").mkdir(parents=True)
+    (run_path / "scope").mkdir()
+    web3bb.write_json(
+        run_path / "metadata" / "run_metadata.json",
+        {"target_name": "Demo", "program_url": "https://example.com/program", "created_at": "2026-06-07T00:00:00+00:00"},
+    )
+    web3bb.write_json(run_path / "metadata" / "tool_versions.json", {})
+    (run_path / "scope" / "scope_brief.md").write_text("# Scope\n", encoding="utf-8")
+    web3bb.add_hypothesis(run_path, {"title": "Route packet", "hypothesis": "Export through web route."})
+
+    response = client.post("/api/review-packet", json={"run": str(run_path)})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert Path(payload["chatgpt_packet"]).exists()
+    assert (run_path / "review_packet" / "tracker" / "tracker.csv").exists()
+    assert "Route packet" in Path(payload["chatgpt_packet"]).read_text(encoding="utf-8")
 
 
 def test_web3bb_init_accepts_source_directory(tmp_path, monkeypatch):

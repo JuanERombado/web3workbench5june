@@ -78,6 +78,7 @@ def main() -> None:
     add.add_argument("--status", default="New", choices=web3bb.HYPOTHESIS_STATUSES)
     add.add_argument("--poc-status", default="Needs PoC")
     add.add_argument("--validation-status", default="Unvalidated")
+    add.add_argument("--gate-decision", default="")
     add.add_argument("--known-issue-check", default="")
     add.add_argument("--notes", default="")
     add.add_argument("--next-action", default="")
@@ -99,12 +100,23 @@ def main() -> None:
     update.add_argument("--impact-mapping")
     update.add_argument("--poc-status")
     update.add_argument("--validation-status")
+    update.add_argument("--gate-decision")
     update.add_argument("--known-issue-check")
     update.add_argument("--notes")
     update.add_argument("--next-action")
 
     export = subparsers.add_parser("export")
     export.add_argument("--run", required=True)
+
+    review = subparsers.add_parser("export-review-packet")
+    review.add_argument("--run", required=True)
+    review.add_argument("--hypothesis", action="append", default=[])
+
+    gate = subparsers.add_parser("gate-hypothesis")
+    gate.add_argument("--run", required=True)
+    gate.add_argument("--id", required=True)
+    gate.add_argument("--decision", required=True)
+    gate.add_argument("--notes", default="")
 
     close = subparsers.add_parser("close-hypothesis")
     close.add_argument("--run", required=True)
@@ -158,12 +170,19 @@ def main() -> None:
         row = web3bb.update_hypothesis(Path(args.run), args.id, update_args(args))
         print_json(dict(row))
         return
+    if args.command_name == "gate-hypothesis":
+        row = web3bb.gate_hypothesis(Path(args.run), args.id, args.decision, args.notes)
+        print_json(dict(row))
+        return
     if args.command_name == "close-hypothesis":
         row = web3bb.close_hypothesis(Path(args.run), args.id, args.status, args.reason)
         print_json(dict(row))
         return
     if args.command_name == "export":
         print_json(web3bb.export_run(Path(args.run)))
+        return
+    if args.command_name == "export-review-packet":
+        print_json(web3bb.export_review_packet(Path(args.run), args.hypothesis))
         return
     if args.command_name == "seed-axelar":
         row = web3bb.seed_axelar(Path(args.run))
@@ -209,6 +228,7 @@ def hypothesis_args(args) -> dict:
         "status": args.status,
         "poc_status": args.poc_status,
         "validation_status": args.validation_status,
+        "gate_decision": args.gate_decision,
         "known_issue_check": args.known_issue_check,
         "notes": args.notes,
         "next_action": args.next_action,
@@ -224,6 +244,7 @@ def update_args(args) -> dict:
         "impact_mapping": args.impact_mapping,
         "poc_status": args.poc_status,
         "validation_status": args.validation_status,
+        "gate_decision": args.gate_decision,
         "known_issue_check": args.known_issue_check,
         "notes": args.notes,
         "next_action": args.next_action,

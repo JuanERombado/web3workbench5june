@@ -160,6 +160,39 @@ def init_run(target_name: str, program_url: str, zip_path: Path) -> Path:
     return run_path
 
 
+def list_runs(root: Path = RUNS_ROOT) -> list[dict]:
+    runs = []
+    if not root.exists():
+        return runs
+    for metadata_path in root.glob("*/*/metadata/run_metadata.json"):
+        run_path = metadata_path.parents[1]
+        metadata = read_json(metadata_path)
+        try:
+            hypotheses = [dict(row) for row in list_hypotheses(run_path)]
+        except sqlite3.Error:
+            hypotheses = []
+        status_counts: dict[str, int] = {}
+        for row in hypotheses:
+            status = row.get("status", "New")
+            status_counts[status] = status_counts.get(status, 0) + 1
+        latest_status = ""
+        if hypotheses:
+            latest = max(hypotheses, key=lambda item: item.get("updated_at", ""))
+            latest_status = latest.get("status", "")
+        runs.append(
+            {
+                "run_path": str(run_path),
+                "target_name": metadata.get("target_name", run_path.parent.name),
+                "program_url": metadata.get("program_url", ""),
+                "created_at": metadata.get("created_at", run_path.name),
+                "hypothesis_count": len(hypotheses),
+                "status_counts": status_counts,
+                "latest_status": latest_status,
+            }
+        )
+    return sorted(runs, key=lambda item: item.get("created_at", ""), reverse=True)
+
+
 def extract_repo(zip_path: Path, repo_dir: Path) -> None:
     if zip_path.is_dir():
         copy_tree_contents(zip_path, repo_dir)
@@ -405,9 +438,9 @@ def add_hypothesis(run_path: Path, values: dict) -> sqlite3.Row:
             INSERT INTO hypotheses (
                 id, status, title, target, contract, function, hypothesis, source, tool_evidence,
                 manual_evidence, scope_mapping, impact_mapping, poc_status, validation_status,
-                known_issue_check, notes, next_action, closure_notes, created_at, updated_at
+                gate_decision, known_issue_check, notes, next_action, closure_notes, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 hypothesis_id,
@@ -424,6 +457,7 @@ def add_hypothesis(run_path: Path, values: dict) -> sqlite3.Row:
                 values.get("impact_mapping", ""),
                 values.get("poc_status", "Needs PoC"),
                 values.get("validation_status", "Unvalidated"),
+                values.get("gate_decision", ""),
                 values.get("known_issue_check", ""),
                 values.get("notes", ""),
                 values.get("next_action", ""),
@@ -526,6 +560,7 @@ def normalize_lead_values(values: dict) -> dict:
         "impact_mapping",
         "poc_status",
         "validation_status",
+        "gate_decision",
         "known_issue_check",
         "notes",
         "next_action",
@@ -570,12 +605,19 @@ def list_hypotheses(run_path: Path) -> list[sqlite3.Row]:
 def update_hypothesis(run_path: Path, hypothesis_id: str, values: dict) -> sqlite3.Row:
     allowed = {
         "status",
+        "title",
+        "target",
+        "contract",
+        "function",
+        "hypothesis",
+        "source",
         "tool_evidence",
         "manual_evidence",
         "scope_mapping",
         "impact_mapping",
         "poc_status",
         "validation_status",
+        "gate_decision",
         "known_issue_check",
         "notes",
         "next_action",
@@ -596,6 +638,18 @@ def update_hypothesis(run_path: Path, hypothesis_id: str, values: dict) -> sqlit
     if row is None:
         raise ValueError(f"Hypothesis not found: {hypothesis_id}")
     write_hypothesis_md(run_path, row)
+    return row
+
+
+def gate_hypothesis(run_path: Path, hypothesis_id: str, decision: str, notes: str = "") -> sqlite3.Row:
+    note = notes.strip()
+    values = {"gate_decision": decision.strip()}
+    if note:
+        existing = get_hypothesis(run_path, hypothesis_id)["notes"]
+        stamp = now_iso()
+        values["notes"] = f"{existing.rstrip()}\n{stamp} gate: {note}".strip() if existing else f"{stamp} gate: {note}"
+    row = update_hypothesis(run_path, hypothesis_id, values)
+    export_run(run_path)
     return row
 
 
@@ -625,6 +679,165 @@ def close_hypothesis(run_path: Path, hypothesis_id: str, status: str, reason: st
     append_hypothesis_closure_note(run_path, row, note)
     export_run(run_path)
     return row
+
+
+def get_hypothesis(run_path: Path, hypothesis_id: str) -> sqlite3.Row:
+    with run_db(run_path) as conn:
+        ensure_run_schema(conn)
+        row = conn.execute("SELECT * FROM hypotheses WHERE id = ?", (hypothesis_id,)).fetchone()
+    if row is None:
+        raise ValueError(f"Hypothesis not found: {hypothesis_id}")
+    return row
+
+
+def tool_execution_history(run_path: Path) -> list[dict]:
+    with run_db(run_path) as conn:
+        ensure_run_schema(conn)
+        return [
+            dict(row)
+            for row in conn.execute("SELECT * FROM tool_executions ORDER BY id DESC").fetchall()
+        ]
+
+
+def fetch_page_text(url: str) -> str:
+    try:
+        import requests
+        from bs4 import BeautifulSoup
+    except ImportError as exc:  # pragma: no cover - dependency guidance
+        raise RuntimeError("Install requests and beautifulsoup4 to fetch page text.") from exc
+
+    response = requests.get(
+        url,
+        timeout=20,
+        headers={"User-Agent": "Web3 Bug Bounty Workbench/0.1"},
+    )
+    response.raise_for_status()
+    soup = BeautifulSoup(response.text, "html.parser")
+    for tag in soup(["script", "style", "noscript"]):
+        tag.decompose()
+    lines = [line.strip() for line in soup.get_text("\n").splitlines()]
+    return "\n".join(line for line in lines if line)
+
+
+def export_review_packet(run_path: Path, hypothesis_ids: Iterable[str] | None = None) -> dict:
+    exports = export_run(run_path)
+    packet = run_path / "review_packet"
+    if packet.exists():
+        shutil.rmtree(packet)
+    packet.mkdir(parents=True)
+    selected_ids = set(hypothesis_ids or [])
+
+    included: list[str] = []
+    for rel in [
+        Path("scope") / "scope_brief.md",
+        Path("tracker") / "summary.md",
+        Path("tracker") / "tracker.csv",
+        Path("tracker") / "run_summary.md",
+        Path("metadata") / "project_detect.json",
+        Path("metadata") / "profiles.json",
+    ]:
+        copy_review_file(run_path, packet, rel, included)
+
+    hypotheses = [dict(row) for row in list_hypotheses(run_path)]
+    for row in hypotheses:
+        if selected_ids and row["id"] not in selected_ids:
+            continue
+        copy_review_file(run_path, packet, Path("hypotheses") / f"{row['id']}.md", included)
+
+    for poc_path in sorted((run_path / "poc").glob("*")) if (run_path / "poc").exists() else []:
+        if poc_path.is_file() and poc_path.suffix.lower() in {".md", ".txt"}:
+            copy_review_file(run_path, packet, poc_path.relative_to(run_path), included)
+
+    for path in sorted((run_path / "tool-output").rglob("*")) if (run_path / "tool-output").exists() else []:
+        if path.is_file() and path.name in {"stdout.txt", "stderr.txt", "execution.json"}:
+            copy_review_file(run_path, packet, path.relative_to(run_path), included)
+
+    packet_md = packet / "chatgpt_packet.md"
+    packet_md.write_text(build_chatgpt_packet(run_path, hypotheses, included), encoding="utf-8")
+    included.append(str(packet_md.relative_to(packet)))
+    return {"review_packet": str(packet), "chatgpt_packet": str(packet_md), "included_files": included, **exports}
+
+
+def copy_review_file(run_path: Path, packet: Path, rel: Path, included: list[str]) -> None:
+    src = run_path / rel
+    if not src.exists() or not src.is_file():
+        return
+    dest = packet / rel
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dest)
+    included.append(str(rel))
+
+
+def build_chatgpt_packet(run_path: Path, hypotheses: list[dict], included: list[str]) -> str:
+    metadata = read_json(run_path / "metadata" / "run_metadata.json") if (run_path / "metadata" / "run_metadata.json").exists() else {}
+    resources = read_json(run_path / "scope" / "resources.json") if (run_path / "scope" / "resources.json").exists() else {}
+    open_rows = [row for row in hypotheses if not str(row.get("status", "")).startswith("Rejected")]
+    closed_rows = [row for row in hypotheses if str(row.get("status", "")).startswith("Rejected")]
+    executions = tool_execution_history(run_path)
+    lines = [
+        "# ChatGPT Review Packet",
+        "",
+        "## Target",
+        f"- Name: {metadata.get('target_name', '')}",
+        f"- Program URL: {metadata.get('program_url', '')}",
+        f"- Run path: {run_path}",
+        "",
+        "## Scope URLs",
+    ]
+    for url in resources.get("urls", []):
+        lines.append(f"- {url}")
+    lines.extend(["", "## Current Hypotheses"])
+    add_packet_hypotheses(lines, open_rows)
+    lines.extend(["", "## Closed Or Rejected Hypotheses"])
+    add_packet_hypotheses(lines, closed_rows)
+    lines.extend(["", "## Tool Results"])
+    for execution in executions:
+        lines.append(
+            f"- {execution['tool']} exit {execution['exit_code']}: {execution.get('parsed_summary', '')}"
+        )
+        lines.extend(tool_snippets(execution))
+    lines.extend(
+        [
+            "",
+            "## Known Blockers",
+            "- Review manually for stale scope, missing tool output, and unproven asset assumptions.",
+            "",
+            "## Files Included",
+        ]
+    )
+    lines.extend(f"- {item}" for item in included)
+    lines.extend(
+        [
+            "",
+            "## Questions For ChatGPT Or Manual Reviewer",
+            "- Which hypotheses still need scoped-asset confirmation?",
+            "- Which rejected hypotheses should stay closed?",
+            "- What is the next lowest-cost validation step?",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def add_packet_hypotheses(lines: list[str], rows: list[dict]) -> None:
+    if not rows:
+        lines.append("- None")
+        return
+    for row in rows:
+        lines.append(
+            f"- {row.get('id', '')}: {row.get('title', '')} "
+            f"({row.get('status', '')}; next: {row.get('next_action', '')})"
+        )
+
+
+def tool_snippets(execution: dict, limit: int = 800) -> list[str]:
+    snippets = []
+    for label, key in [("stdout", "stdout_path"), ("stderr", "stderr_path")]:
+        path = Path(execution.get(key, ""))
+        if path.exists():
+            text = path.read_text(encoding="utf-8", errors="replace").strip()
+            if text:
+                snippets.append(f"  - {label}: {text[:limit]}")
+    return snippets
 
 
 def export_run(run_path: Path) -> dict:
@@ -697,6 +910,7 @@ def ensure_run_schema(conn: sqlite3.Connection) -> None:
             impact_mapping TEXT NOT NULL DEFAULT '',
             poc_status TEXT NOT NULL DEFAULT 'Needs PoC',
             validation_status TEXT NOT NULL DEFAULT 'Unvalidated',
+            gate_decision TEXT NOT NULL DEFAULT '',
             known_issue_check TEXT NOT NULL DEFAULT '',
             notes TEXT NOT NULL DEFAULT '',
             next_action TEXT NOT NULL DEFAULT '',
@@ -725,6 +939,7 @@ def ensure_run_schema(conn: sqlite3.Connection) -> None:
         "hypotheses",
         {
             "status": "TEXT NOT NULL DEFAULT 'New'",
+            "gate_decision": "TEXT NOT NULL DEFAULT ''",
             "closure_notes": "TEXT NOT NULL DEFAULT ''",
         },
     )
@@ -841,6 +1056,7 @@ def write_hypothesis_md(run_path: Path, row: sqlite3.Row) -> None:
         ("Impact Mapping", "impact_mapping"),
         ("PoC Status", "poc_status"),
         ("Validation Status", "validation_status"),
+        ("Gate Decision", "gate_decision"),
         ("Known Issue Check", "known_issue_check"),
         ("Notes", "notes"),
         ("Next Action", "next_action"),
@@ -903,6 +1119,7 @@ def write_summary(path: Path, rows: list[dict]) -> None:
         lines.append(f"- Function: {row.get('function', '')}")
         lines.append(f"- PoC Status: {row.get('poc_status', '')}")
         lines.append(f"- Validation Status: {row.get('validation_status', '')}")
+        lines.append(f"- Gate Decision: {row.get('gate_decision', '')}")
         lines.append(f"- Next Action: {row.get('next_action', '')}")
         lines.append("")
     path.write_text("\n".join(lines), encoding="utf-8")
@@ -932,7 +1149,7 @@ def write_run_summary(run_path: Path, path: Path, rows: list[dict]) -> None:
 
 
 def print_table(rows: list[sqlite3.Row]) -> str:
-    headers = ["ID", "Title", "Status", "Contract", "PoC", "Validation", "Next Action"]
+    headers = ["ID", "Title", "Status", "Contract", "PoC", "Validation", "Gate", "Next Action"]
     body = [
         [
             row["id"],
@@ -941,6 +1158,7 @@ def print_table(rows: list[sqlite3.Row]) -> str:
             row["contract"],
             row["poc_status"],
             row["validation_status"],
+            row["gate_decision"],
             row["next_action"],
         ]
         for row in rows
@@ -970,6 +1188,7 @@ def hypothesis_fields() -> list[str]:
         "impact_mapping",
         "poc_status",
         "validation_status",
+        "gate_decision",
         "known_issue_check",
         "notes",
         "next_action",

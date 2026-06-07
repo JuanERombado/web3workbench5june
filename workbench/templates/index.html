@@ -3,103 +3,177 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Hypothesis Workbench</title>
+    <title>Web3 Bug Bounty Workbench</title>
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
     <header class="topbar">
       <div>
-        <h1>Hypothesis Workbench</h1>
-        <p>Local evidence tracker for quick Foundry and Slither hypothesis checks.</p>
+        <h1>Web3 Bug Bounty Workbench</h1>
+        <p>Localhost analysis pipeline for runs, scope, scans, hypotheses, and review packets.</p>
       </div>
       <div class="status-line">
-        <span>127.0.0.1</span>
-        <span>No external APIs</span>
+        <span>http://127.0.0.1:8765</span>
+        <span>No AI APIs</span>
+        <span>Local files only</span>
       </div>
     </header>
 
-    <main class="workspace">
-      <section class="setup-pane">
-        <div class="panel">
-          <h2>Target Setup</h2>
-          <form id="target-form">
-            <label>Target name<input name="name" required placeholder="protocol-name" /></label>
-            <label>Repo path<input name="repo_path" required placeholder="C:\path\to\target" /></label>
-            <label>Scope file path<input name="scope_path" required placeholder="C:\path\to\scope.md" /></label>
-            <button type="submit">Create Target</button>
-          </form>
+    <main class="layout">
+      <aside class="nav">
+        <button data-tab="dashboard" class="active">Dashboard</button>
+        <button data-tab="new-target">New Target</button>
+        <button data-tab="doctor">Doctor</button>
+        <button data-tab="scope">Scope</button>
+        <button data-tab="scan">Scan</button>
+        <button data-tab="hypotheses">Hypotheses</button>
+        <button data-tab="packet">Review Packet</button>
+      </aside>
+
+      <section class="content">
+        <div class="current-run">
+          <label>Current run <input id="current-run" placeholder="Select a run from Dashboard" /></label>
+          <button id="refresh-all" type="button">Refresh</button>
+          <button id="open-run-folder" type="button">Open Folder</button>
         </div>
 
-        <div class="panel">
-          <h2>Hypothesis Entry</h2>
-          <form id="hypothesis-form">
-            <label>Target<select name="target" id="target-select" required></select></label>
-            <label>Title<input name="title" required placeholder="Unchecked transfer can drain vault" /></label>
-            <label>Hypothesis<textarea name="description" required rows="7"></textarea></label>
-            <div class="field-grid">
-              <label>Affected file<input name="affected_files" /></label>
-              <label>Affected function<input name="affected_functions" /></label>
+        <section id="dashboard" class="tab active">
+          <div class="section-head">
+            <h2>Dashboard</h2>
+            <button id="dashboard-refresh" type="button">Refresh Runs</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Target</th>
+                  <th>Program URL</th>
+                  <th>Created</th>
+                  <th>Hypotheses</th>
+                  <th>Latest Status</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="runs-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="new-target" class="tab">
+          <h2>New Target</h2>
+          <form id="new-target-form" class="panel form-grid">
+            <label>Target name <input name="target_name" required /></label>
+            <label>Program URL <input name="program_url" required /></label>
+            <label>Scope URL <input name="scope_url" /></label>
+            <label>Resources URL <input name="resources_url" /></label>
+            <label>Local zip/folder path <input name="source_path" placeholder="C:\path\to\repo.zip or C:\path\to\repo" /></label>
+            <label>Upload zip <input name="source_upload" type="file" accept=".zip" /></label>
+            <div class="button-row">
+              <button type="submit">Init</button>
+              <button id="ingest-run" type="button">Ingest</button>
+              <button id="scope-run" type="button">Scope</button>
             </div>
-            <div class="field-grid">
-              <label>Attacker role<input name="attacker_role" /></label>
-              <label>Expected impact<input name="expected_impact" /></label>
+          </form>
+        </section>
+
+        <section id="doctor" class="tab">
+          <div class="section-head">
+            <h2>Tool Doctor</h2>
+            <button id="run-doctor" type="button">Run Doctor</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Tool</th><th>Detected</th><th>Version</th><th>Path</th><th>Install Hint</th></tr></thead>
+              <tbody id="doctor-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="scope" class="tab">
+          <div class="section-head">
+            <h2>Scope</h2>
+            <div class="button-row">
+              <button id="load-scope" type="button">Load</button>
+              <button id="save-scope" type="button">Save</button>
             </div>
-            <div class="field-grid">
-              <label>Tool
-                <select name="tool">
-                  <option value="foundry">Foundry</option>
-                  <option value="slither">Slither</option>
-                </select>
-              </label>
-              <label>Command<input name="command" placeholder="mock:foundry:pass" /></label>
+          </div>
+          <textarea id="scope-editor" class="editor" spellcheck="false"></textarea>
+        </section>
+
+        <section id="scan" class="tab">
+          <div class="section-head">
+            <h2>Scan</h2>
+            <div class="button-row">
+              <select id="profile-select"></select>
+              <button id="scan-generic" type="button">Generic</button>
+              <button id="scan-profile" type="button">Selected Profile</button>
+              <button id="scan-all" type="button">All Profiles</button>
+              <button id="refresh-executions" type="button">Refresh History</button>
             </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Tool</th><th>Command</th><th>Exit</th><th>Summary</th><th>Stdout</th><th>Stderr</th><th>Execution</th><th>Started</th></tr></thead>
+              <tbody id="executions-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="hypotheses" class="tab">
+          <div class="section-head">
+            <h2>Hypotheses</h2>
+            <div class="button-row">
+              <button id="export-tracker" type="button">Export Tracker</button>
+            </div>
+          </div>
+          <form id="hypothesis-form" class="panel form-grid">
+            <label>Title <input name="title" required /></label>
+            <label>Contract <input name="contract" /></label>
+            <label>Function <input name="function" /></label>
+            <label>Status <select name="status" id="status-select"></select></label>
+            <label>PoC status <input name="poc_status" value="Needs PoC" /></label>
+            <label>Validation status <input name="validation_status" value="Unvalidated" /></label>
+            <label>Gate decision <input name="gate_decision" /></label>
+            <label>Next action <input name="next_action" /></label>
+            <label class="wide">Hypothesis <textarea name="hypothesis" rows="4"></textarea></label>
+            <label class="wide">Notes <textarea name="notes" rows="3"></textarea></label>
             <button type="submit">Add Hypothesis</button>
           </form>
-        </div>
-      </section>
-
-      <section class="run-pane">
-        <div class="panel runner">
-          <h2>Tool Runner</h2>
-          <form id="run-form">
-            <label>Hypothesis<select name="hypothesis_id" id="hypothesis-select" required></select></label>
-            <div class="field-grid">
-              <label>Tool
-                <select name="tool">
-                  <option value="foundry">Foundry</option>
-                  <option value="slither">Slither</option>
-                </select>
-              </label>
-              <label>Mock command<input name="command" required value="mock:foundry:pass" /></label>
-            </div>
-            <button type="submit">Run</button>
+          <form id="import-form" class="panel inline-form">
+            <label>Lead file path <input name="file_path" placeholder="C:\path\to\leads.csv or leads.md" /></label>
+            <button type="submit">Import Leads</button>
           </form>
-          <div id="run-result" class="run-result">No run selected.</div>
-        </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>ID</th><th>Title</th><th>Status</th><th>PoC</th><th>Validation</th><th>Gate</th><th>Next Action</th><th>Actions</th></tr></thead>
+              <tbody id="hypotheses-body"></tbody>
+            </table>
+          </div>
+        </section>
 
-        <div class="table-head">
-          <h2>Results</h2>
-          <button id="refresh-button" type="button">Refresh</button>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>ID</th>
-                <th>Title</th>
-                <th>Tool</th>
-                <th>Tool Status</th>
-                <th>Manual Verdict</th>
-                <th>Last Run</th>
-                <th>Raw Log</th>
-                <th>Decision Notes</th>
-              </tr>
-            </thead>
-            <tbody id="results-body"></tbody>
-          </table>
-        </div>
+        <section id="packet" class="tab">
+          <div class="section-head">
+            <h2>Review Packet</h2>
+            <div class="button-row">
+              <button id="export-packet" type="button">Export ChatGPT Review Packet</button>
+              <button id="copy-packet" type="button">Copy To Clipboard</button>
+            </div>
+          </div>
+          <pre id="packet-path" class="output">No packet exported yet.</pre>
+          <textarea id="packet-content" class="editor" spellcheck="false"></textarea>
+        </section>
+
+        <pre id="messages" class="messages"></pre>
       </section>
     </main>
+
+    <dialog id="file-dialog">
+      <div class="section-head">
+        <h2 id="file-title">File</h2>
+        <button id="close-file-dialog" type="button">Close</button>
+      </div>
+      <pre id="file-content"></pre>
+    </dialog>
 
     <script src="/static/app.js"></script>
   </body>
