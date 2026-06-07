@@ -124,6 +124,40 @@ def main() -> None:
     close.add_argument("--status", required=True)
     close.add_argument("--reason", required=True)
 
+    known_add = subparsers.add_parser("known-add")
+    known_add.add_argument("--run", required=True)
+    known_add.add_argument("--url", required=True)
+    known_add.add_argument("--type", required=True, choices=web3bb.KNOWN_SOURCE_TYPES)
+    known_add.add_argument("--title", required=True)
+    known_add.add_argument("--notes", default="")
+
+    known_file = subparsers.add_parser("known-import-file")
+    known_file.add_argument("--run", required=True)
+    known_file.add_argument("--file", required=True)
+    known_file.add_argument("--type", required=True, choices=web3bb.KNOWN_SOURCE_TYPES)
+    known_file.add_argument("--title")
+    known_file.add_argument("--notes", default="")
+
+    known_list = subparsers.add_parser("known-list")
+    known_list.add_argument("--run", required=True)
+
+    known_search = subparsers.add_parser("known-search")
+    known_search.add_argument("--run", required=True)
+    known_search.add_argument("--query", required=True)
+
+    known_export = subparsers.add_parser("known-export")
+    known_export.add_argument("--run", required=True)
+
+    known_dedupe = subparsers.add_parser("known-dedupe")
+    known_dedupe.add_argument("--run", required=True)
+
+    check_known = subparsers.add_parser("check-known")
+    check_known.add_argument("--run", required=True)
+    check_known.add_argument("--id", required=True)
+
+    seed_known = subparsers.add_parser("seed-axelar-known")
+    seed_known.add_argument("--run", required=True)
+
     seed = subparsers.add_parser("seed-axelar")
     seed.add_argument("--run", required=True)
 
@@ -183,6 +217,32 @@ def main() -> None:
         return
     if args.command_name == "export-review-packet":
         print_json(web3bb.export_review_packet(Path(args.run), args.hypothesis))
+        return
+    if args.command_name == "known-add":
+        row = web3bb.known_add_url(Path(args.run), args.url, args.type, args.title, args.notes)
+        print_json(dict(row))
+        return
+    if args.command_name == "known-import-file":
+        row = web3bb.known_import_file(Path(args.run), Path(args.file), args.type, args.title, args.notes)
+        print_json(dict(row))
+        return
+    if args.command_name == "known-list":
+        print_json(web3bb.known_list(Path(args.run)))
+        return
+    if args.command_name == "known-search":
+        print_json(web3bb.known_search(Path(args.run), args.query))
+        return
+    if args.command_name == "known-export":
+        print_json(web3bb.known_export(Path(args.run)))
+        return
+    if args.command_name == "known-dedupe":
+        print_json(web3bb.known_dedupe(Path(args.run)))
+        return
+    if args.command_name == "check-known":
+        print_json(web3bb.check_known(Path(args.run), args.id))
+        return
+    if args.command_name == "seed-axelar-known":
+        print_json(web3bb.seed_axelar_known_sources(Path(args.run)))
         return
     if args.command_name == "seed-axelar":
         row = web3bb.seed_axelar(Path(args.run))

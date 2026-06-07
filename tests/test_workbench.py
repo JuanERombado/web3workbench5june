@@ -326,6 +326,374 @@ def test_web_review_packet_route_exports_packet(tmp_path, monkeypatch):
     assert "Route packet" in Path(payload["chatgpt_packet"]).read_text(encoding="utf-8")
 
 
+def test_known_issue_corpus_import_search_check_and_export(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_path = tmp_path / "run"
+    (run_path / "metadata").mkdir(parents=True)
+    web3bb.write_json(run_path / "metadata" / "run_metadata.json", {"target_name": "Demo", "program_url": ""})
+    web3bb.write_json(run_path / "metadata" / "tool_versions.json", {})
+    report = tmp_path / "report.md"
+    report.write_text(
+        "# Prior audit\n\nBridgeVault withdraw used stale oracle accounting causing direct loss of funds.\n",
+        encoding="utf-8",
+    )
+    hypothesis = web3bb.add_hypothesis(
+        run_path,
+        {
+            "title": "BridgeVault stale oracle withdraw",
+            "contract": "BridgeVault",
+            "function": "withdraw",
+            "hypothesis": "Withdraw can use stale oracle accounting.",
+            "impact_mapping": "Direct loss of funds.",
+        },
+    )
+
+    source = web3bb.known_import_file(run_path, report, "audit", "Prior BridgeVault audit")
+    matches = web3bb.known_search(run_path, "BridgeVault withdraw stale oracle direct loss")
+    check = web3bb.check_known(run_path, hypothesis["id"])
+    exported = web3bb.known_export(run_path)
+
+    assert source["source_type"] == "audit"
+    assert matches
+    assert matches[0]["confidence"] in {"High", "Medium"}
+    assert check["recommendation"] in {"likely public duplicate", "needs manual review"}
+    assert Path(exported["known_csv"]).exists()
+    assert Path(exported["known_summary"]).exists()
+
+
+def test_known_add_url_indexes_fetched_page_text(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_path = tmp_path / "run"
+    (run_path / "metadata").mkdir(parents=True)
+    web3bb.write_json(run_path / "metadata" / "run_metadata.json", {"target_name": "Demo", "program_url": ""})
+
+    monkeypatch.setattr(
+        web3bb,
+        "fetch_page_text",
+        lambda url: "Axelar Interchain Token Service express execution reimbursement public known issue text.",
+    )
+
+    source = web3bb.known_add_url(
+        run_path,
+        "https://example.com/axelar-known",
+        "report",
+        "Fetched Axelar report",
+    )
+    sources = web3bb.known_list(run_path)
+    matches = web3bb.known_search(run_path, "express execution reimbursement")
+
+    assert source["url"] == "https://example.com/axelar-known"
+    assert source["fetch_status"] == "fetched"
+    assert sources[0]["chunk_count"] == 1
+    assert "express execution reimbursement" in matches[0]["snippet"]
+
+
+def test_known_add_url_falls_back_to_marked_stub_on_fetch_failure(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_path = tmp_path / "run"
+    (run_path / "metadata").mkdir(parents=True)
+    web3bb.write_json(run_path / "metadata" / "run_metadata.json", {"target_name": "Demo", "program_url": ""})
+
+    def fail_fetch(url):
+        raise RuntimeError("network unavailable")
+
+    monkeypatch.setattr(web3bb, "fetch_page_text", fail_fetch)
+
+    source = web3bb.known_add_url(
+        run_path,
+        "https://example.com/failure",
+        "docs",
+        "Fallback source",
+        "Original note",
+    )
+    matches = web3bb.known_search(run_path, "Fallback source failure")
+
+    assert source["url"] == "https://example.com/failure"
+    assert source["fetch_status"] == "FETCH_FAILED"
+    assert "FETCH_FAILED" in source["notes"]
+    assert matches
+
+
+def test_closed_hypotheses_are_indexed_as_known_rejections(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_path = tmp_path / "run"
+    (run_path / "metadata").mkdir(parents=True)
+    web3bb.write_json(run_path / "metadata" / "run_metadata.json", {"target_name": "Demo", "program_url": ""})
+    web3bb.write_json(run_path / "metadata" / "tool_versions.json", {})
+    hypothesis = web3bb.add_hypothesis(
+        run_path,
+        {"title": "Fee mismatch", "hypothesis": "No scoped fee asymmetric asset exists."},
+    )
+    web3bb.close_hypothesis(run_path, hypothesis["id"], "Rejected - No Impact", "No scoped fee-asymmetric asset found.")
+
+    sources = web3bb.known_list(run_path)
+    matches = web3bb.known_search(run_path, "fee asymmetric scoped asset")
+
+    assert any(source["source_type"] == "rejection" for source in sources)
+    assert matches
+
+
+def test_seed_axelar_known_upserts_without_duplicates(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_path = tmp_path / "run"
+    (run_path / "metadata").mkdir(parents=True)
+    web3bb.write_json(run_path / "metadata" / "run_metadata.json", {"target_name": "Axelar", "program_url": ""})
+
+    monkeypatch.setattr(web3bb, "fetch_page_text", lambda url: f"Fetched page text for {url} express reimbursement scope.")
+
+    first = web3bb.seed_axelar_known_sources(run_path)
+    second = web3bb.seed_axelar_known_sources(run_path)
+    sources = web3bb.known_list(run_path)
+
+    assert len(first) == 8
+    assert len(second) == 8
+    assert len(sources) == 8
+    assert sum(1 for source in sources if source["fetch_status"] == "fetched") == 6
+
+
+def test_seed_axelar_known_replaces_old_manual_url_stub(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_path = tmp_path / "run"
+    (run_path / "metadata").mkdir(parents=True)
+    web3bb.write_json(run_path / "metadata" / "run_metadata.json", {"target_name": "Axelar", "program_url": ""})
+    old_url = "https://code4rena.com/reports/2023-07-axelar"
+    with web3bb.run_db(run_path) as conn:
+        web3bb.ensure_run_schema(conn)
+        cursor = conn.execute(
+            """
+            INSERT INTO known_sources (title, url, file_path, source_type, fetched_at, text_hash, notes, fetch_status, source_key)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "Code4rena 2023 Axelar report",
+                "",
+                "",
+                "manual",
+                "old",
+                "old-hash",
+                "old manual stub",
+                "manual",
+                "",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO known_chunks (source_id, chunk_index, text) VALUES (?, ?, ?)",
+            (cursor.lastrowid, 0, f"Code4rena 2023 Axelar report\n{old_url}\nold manual stub"),
+        )
+        conn.commit()
+
+    monkeypatch.setattr(web3bb, "fetch_page_text", lambda url: f"Fetched full report content {url} express reimbursement.")
+    web3bb.seed_axelar_known_sources(run_path)
+    web3bb.known_dedupe(run_path)
+    matches = [source for source in web3bb.known_list(run_path) if source["url"].rstrip("/") == old_url]
+
+    assert len(matches) == 1
+    assert matches[0]["fetch_status"] == "fetched"
+    assert matches[0]["chunk_count"] == 1
+
+
+def test_closed_hypothesis_indexes_once(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_path = tmp_path / "run"
+    (run_path / "metadata").mkdir(parents=True)
+    web3bb.write_json(run_path / "metadata" / "run_metadata.json", {"target_name": "Demo", "program_url": ""})
+    hypothesis = web3bb.add_hypothesis(run_path, {"id": "H-001", "title": "Closed once", "hypothesis": "Rejected duplicate."})
+    web3bb.close_hypothesis(run_path, hypothesis["id"], "Rejected - No Impact", "No impact.")
+
+    web3bb.known_list(run_path)
+    web3bb.known_list(run_path)
+    sources = [source for source in web3bb.known_list(run_path) if source["source_type"] == "rejection"]
+
+    assert len(sources) == 1
+
+
+def test_check_known_weak_generic_report_match_stays_low(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_path = tmp_path / "run"
+    (run_path / "metadata").mkdir(parents=True)
+    web3bb.write_json(run_path / "metadata" / "run_metadata.json", {"target_name": "Demo", "program_url": ""})
+    hypothesis = web3bb.add_hypothesis(
+        run_path,
+        {
+            "title": "InterchainTokenService reimbursement mismatch",
+            "contract": "InterchainTokenService",
+            "function": "expressExecute",
+            "hypothesis": "Express executor reimbursement accounting mismatch can cause direct loss of funds.",
+            "impact_mapping": "Direct loss of funds.",
+        },
+    )
+    web3bb.known_add_manual(
+        run_path,
+        "Generic Code4rena Axelar report",
+        "report",
+        "InterchainTokenService contest details overview gas optimization non-critical informational findings.",
+    )
+
+    result = web3bb.check_known(run_path, hypothesis["id"])
+
+    assert result["public_known_matches"] == []
+    assert result["weak_context_matches"]
+    assert result["weak_context_matches"][0]["confidence"] == "Low"
+    assert result["recommendation"] == "proceed"
+
+
+def test_check_known_separates_self_history_match(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_path = tmp_path / "run"
+    (run_path / "metadata").mkdir(parents=True)
+    web3bb.write_json(run_path / "metadata" / "run_metadata.json", {"target_name": "Demo", "program_url": ""})
+    hypothesis = web3bb.add_hypothesis(
+        run_path,
+        {
+            "id": "H-001",
+            "title": "Fee asymmetry mismatch",
+            "contract": "TokenManager",
+            "function": "giveToken",
+            "hypothesis": "Fee asymmetry reimbursement mismatch has no scoped asset.",
+        },
+    )
+    web3bb.close_hypothesis(run_path, hypothesis["id"], "Rejected - No Impact", "No scoped asset.")
+
+    result = web3bb.check_known(run_path, hypothesis["id"])
+
+    assert result["self_history_matches"]
+    assert result["self_history_matches"][0]["match_kind"] == "self-history match"
+    assert result["public_known_matches"] == []
+    assert result["recommendation"] == "self-history match; no strong public duplicate"
+
+
+def test_known_dedupe_merges_old_h001_rejection_sources(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_path = tmp_path / "run"
+    (run_path / "metadata").mkdir(parents=True)
+    web3bb.write_json(run_path / "metadata" / "run_metadata.json", {"target_name": "Demo", "program_url": ""})
+    with web3bb.run_db(run_path) as conn:
+        web3bb.ensure_run_schema(conn)
+        for idx in range(3):
+            cursor = conn.execute(
+                """
+                INSERT INTO known_sources (title, url, file_path, source_type, fetched_at, text_hash, notes, fetch_status, source_key)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"H-001 closed hypothesis - edited {idx}",
+                    "",
+                    "",
+                    "rejection",
+                    f"2026-06-07T00:00:0{idx}+00:00",
+                    f"h001-hash-{idx}",
+                    "old rejection note " * (idx + 1),
+                    "rejection",
+                    f"rejection:h-001:{idx}",
+                ),
+            )
+            conn.execute(
+                "INSERT INTO known_chunks (source_id, chunk_index, text) VALUES (?, ?, ?)",
+                (cursor.lastrowid, 0, f"H-001 closed hypothesis edited version {idx}"),
+            )
+        conn.commit()
+
+    result = web3bb.known_dedupe(run_path)
+    sources = [source for source in web3bb.known_list(run_path) if source["source_type"] == "rejection"]
+
+    assert result["removed_sources"] == 2
+    assert len(sources) == 1
+    assert sources[0]["source_key"] == "rejection:h-001"
+
+
+def test_check_known_contract_and_asset_condition_only_is_medium(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_path = tmp_path / "run"
+    (run_path / "metadata").mkdir(parents=True)
+    web3bb.write_json(run_path / "metadata" / "run_metadata.json", {"target_name": "Demo", "program_url": ""})
+    hypothesis = web3bb.add_hypothesis(
+        run_path,
+        {
+            "title": "InterchainTokenService custom scoped token asset condition",
+            "contract": "InterchainTokenService",
+            "function": "expressExecute",
+            "hypothesis": "Custom scoped token asset condition needs review.",
+            "scope_mapping": "Custom scoped token manager asset.",
+        },
+    )
+    web3bb.known_add_manual(
+        run_path,
+        "Code4rena InterchainTokenService scope context",
+        "report",
+        "InterchainTokenService custom scoped token manager asset configuration context.",
+    )
+
+    result = web3bb.check_known(run_path, hypothesis["id"])
+
+    assert result["public_known_matches"]
+    assert result["public_known_matches"][0]["confidence"] == "Medium"
+    assert result["recommendation"] == "needs manual review"
+
+
+def test_self_history_alone_is_not_likely_duplicate(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_path = tmp_path / "run"
+    (run_path / "metadata").mkdir(parents=True)
+    web3bb.write_json(run_path / "metadata" / "run_metadata.json", {"target_name": "Demo", "program_url": ""})
+    hypothesis = web3bb.add_hypothesis(
+        run_path,
+        {
+            "id": "H-001",
+            "title": "Self history only",
+            "hypothesis": "Previously rejected with no public duplicate.",
+        },
+    )
+    web3bb.close_hypothesis(run_path, hypothesis["id"], "Rejected - No Impact", "Internal dead end only.")
+
+    result = web3bb.check_known(run_path, hypothesis["id"])
+
+    assert result["self_history_matches"]
+    assert result["public_known_matches"] == []
+    assert result["recommendation"] == "self-history match; no strong public duplicate"
+
+
+def test_web_known_routes_import_search_and_check(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    client = TestClient(app)
+    run_path = tmp_path / "run"
+    (run_path / "metadata").mkdir(parents=True)
+    web3bb.write_json(run_path / "metadata" / "run_metadata.json", {"target_name": "Demo", "program_url": ""})
+    web3bb.write_json(run_path / "metadata" / "tool_versions.json", {})
+    hypothesis = web3bb.add_hypothesis(
+        run_path,
+        {
+            "title": "TokenManager reimbursement mismatch",
+            "contract": "TokenManager",
+            "function": "giveToken",
+            "hypothesis": "Reimbursement may duplicate a known issue.",
+        },
+    )
+
+    add_response = client.post(
+        "/api/known/manual",
+        json={
+            "run": str(run_path),
+            "title": "Known reimbursement issue",
+            "source_type": "manual",
+            "text": "TokenManager giveToken reimbursement mismatch is already rejected.",
+        },
+    )
+    search_response = client.post(
+        "/api/known/search",
+        json={"run": str(run_path), "query": "TokenManager giveToken reimbursement mismatch"},
+    )
+    check_response = client.post(
+        "/api/known/check",
+        json={"run": str(run_path), "hypothesis_id": hypothesis["id"]},
+    )
+
+    assert add_response.status_code == 200
+    assert search_response.status_code == 200
+    assert search_response.json()["matches"]
+    assert check_response.status_code == 200
+    assert check_response.json()["matches"]
+
+
 def test_web3bb_init_accepts_source_directory(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     source = tmp_path / "source-dir"

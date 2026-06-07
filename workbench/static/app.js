@@ -4,6 +4,9 @@ const state = {
   executions: [],
   profiles: {},
   statuses: [],
+  known_sources: [],
+  known_source_types: [],
+  known_matches: [],
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -31,8 +34,11 @@ function render() {
   renderRuns();
   renderProfiles();
   renderStatuses();
+  renderKnownTypes();
   renderExecutions();
   renderHypotheses();
+  renderKnownSources();
+  renderKnownResults();
 }
 
 function renderRuns() {
@@ -108,6 +114,7 @@ function renderHypotheses() {
       <td class="actions">
         <button type="button" data-gate="${escapeAttr(row.id)}">Gate</button>
         <button type="button" data-close="${escapeAttr(row.id)}">Close</button>
+        <button type="button" data-check-known="${escapeAttr(row.id)}">Check Known</button>
         <button type="button" data-view-file="${escapeAttr(currentRun.value + "/hypotheses/" + row.id + ".md")}">MD</button>
       </td>
     </tr>
@@ -118,7 +125,48 @@ function renderHypotheses() {
   document.querySelectorAll("[data-close]").forEach((button) => {
     button.addEventListener("click", () => closeHypothesis(button.dataset.close));
   });
+  document.querySelectorAll("[data-check-known]").forEach((button) => {
+    button.addEventListener("click", () => checkKnown(button.dataset.checkKnown));
+  });
   bindFileButtons();
+}
+
+function renderKnownTypes() {
+  document.querySelectorAll(".known-type-select").forEach((select) => {
+    select.innerHTML = state.known_source_types.map((kind) => `<option>${escapeHtml(kind)}</option>`).join("");
+  });
+}
+
+function renderKnownSources() {
+  $("#known-sources-body").innerHTML = state.known_sources.map((source) => `
+    <tr>
+      <td>${source.id}</td>
+      <td>${escapeHtml(source.title)}</td>
+      <td>${escapeHtml(source.source_type)}</td>
+      <td>${escapeHtml(source.fetch_status || "")}</td>
+      <td>${escapeHtml(source.url || source.file_path || "")}</td>
+      <td>${source.chunk_count || 0}</td>
+      <td>${escapeHtml(source.fetched_at)}</td>
+    </tr>
+  `).join("");
+}
+
+function renderKnownResults() {
+  $("#known-results-body").innerHTML = state.known_matches.map((match) => `
+    <tr>
+      <td>${escapeHtml(match.title)}</td>
+      <td>${escapeHtml(match.source_type)}</td>
+      <td>${escapeHtml(match.confidence)}</td>
+      <td>${escapeHtml(match.recommendation)}</td>
+      <td>${escapeHtml(match.snippet)}</td>
+      <td class="actions">
+        <button type="button" data-link-known="${match.source_id}">Link</button>
+      </td>
+    </tr>
+  `).join("");
+  document.querySelectorAll("[data-link-known]").forEach((button) => {
+    button.addEventListener("click", () => linkKnown(Number(button.dataset.linkKnown)));
+  });
 }
 
 function bindFileButtons() {
@@ -310,6 +358,105 @@ $("#export-tracker").addEventListener("click", async () => {
     fail(error);
   }
 });
+
+$("#known-refresh").addEventListener("click", () => load().catch(fail));
+$("#known-export").addEventListener("click", async () => {
+  try {
+    say(await postJson("/api/known/export", { run: requireRun() }));
+    await load();
+  } catch (error) {
+    fail(error);
+  }
+});
+$("#known-dedupe").addEventListener("click", async () => {
+  try {
+    say(await postJson("/api/known/dedupe", { run: requireRun() }));
+    await load();
+  } catch (error) {
+    fail(error);
+  }
+});
+$("#known-seed-axelar").addEventListener("click", async () => {
+  try {
+    say(await postJson("/api/known/seed-axelar", { run: requireRun() }));
+    await load();
+  } catch (error) {
+    fail(error);
+  }
+});
+
+$("#known-url-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    const values = Object.fromEntries(new FormData(event.currentTarget));
+    say(await postJson("/api/known/url", { run: requireRun(), ...values }));
+    event.currentTarget.reset();
+    await load();
+  } catch (error) {
+    fail(error);
+  }
+});
+
+$("#known-file-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    const values = Object.fromEntries(new FormData(event.currentTarget));
+    say(await postJson("/api/known/file", { run: requireRun(), ...values }));
+    event.currentTarget.reset();
+    await load();
+  } catch (error) {
+    fail(error);
+  }
+});
+
+$("#known-manual-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    const values = Object.fromEntries(new FormData(event.currentTarget));
+    say(await postJson("/api/known/manual", { run: requireRun(), ...values }));
+    event.currentTarget.reset();
+    await load();
+  } catch (error) {
+    fail(error);
+  }
+});
+
+$("#known-search-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    const values = Object.fromEntries(new FormData(event.currentTarget));
+    const result = await postJson("/api/known/search", { run: requireRun(), query: values.query });
+    state.known_matches = result.matches;
+    renderKnownResults();
+    say(`${result.matches.length} known issue matches.`);
+  } catch (error) {
+    fail(error);
+  }
+});
+
+async function checkKnown(id) {
+  try {
+    const result = await postJson("/api/known/check", { run: requireRun(), hypothesis_id: id });
+    state.known_matches = result.matches;
+    renderKnownResults();
+    showTab("known");
+    say(result);
+    await load();
+  } catch (error) {
+    fail(error);
+  }
+}
+
+async function linkKnown(sourceId) {
+  const hypothesisId = prompt("Hypothesis ID to link");
+  if (!hypothesisId) return;
+  const notes = prompt("Link notes") || "";
+  try {
+    say(await postJson("/api/known/link", { run: requireRun(), hypothesis_id: hypothesisId, source_id: sourceId, notes }));
+  } catch (error) {
+    fail(error);
+  }
+}
 
 $("#export-packet").addEventListener("click", () => exportPacket().catch(fail));
 

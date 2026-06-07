@@ -74,6 +74,7 @@ The browser UI includes:
 - Scope page for editing `scope/scope_brief.md`.
 - Scan page for generic, selected-profile, and all-profile scans.
 - Hypotheses page for add/import/gate/close workflows.
+- Known Issues page for local audit/report/docs/GitHub/scope/rejection/manual corpus indexing and duplicate checks.
 - Review Packet page for `review_packet/chatgpt_packet.md` with copy-to-clipboard.
 
 The app binds to `127.0.0.1` only and uses the existing run folders plus SQLite DB under each run.
@@ -267,6 +268,48 @@ Report Candidate
 Submitted
 ```
 
+### Known Issue Corpus
+
+Add public known-issue sources or local notes before spending PoC time:
+
+```powershell
+web3bb known-add --run runs/my-target/<timestamp> --url https://example.com/audit --type audit --title "Example audit"
+web3bb known-import-file --run runs/my-target/<timestamp> --file .\known-issues.md --type manual
+web3bb known-list --run runs/my-target/<timestamp>
+web3bb known-search --run runs/my-target/<timestamp> --query "vault withdraw stale oracle"
+web3bb check-known --run runs/my-target/<timestamp> --id H-001
+web3bb known-dedupe --run runs/my-target/<timestamp>
+web3bb known-export --run runs/my-target/<timestamp>
+```
+
+Source types:
+
+```text
+audit
+report
+docs
+github
+scope
+rejection
+manual
+```
+
+The corpus is stored locally in the run SQLite DB using `known_sources`, `known_chunks`, and `known_hypothesis_links`. Text is chunked into searchable plain text. SQLite FTS5 is used when available; otherwise searches fall back to `LIKE`.
+
+`known-add --url` fetches page text, stores the URL in `known_sources.url`, and indexes the fetched text into chunks. If fetching fails, the source is still added as a title/URL/note stub with `fetch_status` set to `FETCH_FAILED`.
+
+Known sources use stable dedupe keys. URL sources key by normalized URL, while manual/rejection sources key by source type, normalized title, and text hash. `known-dedupe` merges old duplicates and prefers `fetch_status=fetched` over stubs.
+
+Closed or rejected hypotheses are auto-indexed as `rejection` sources, so past dead ends become searchable negative-space context.
+
+For Axelar runs, seed starter source notes with:
+
+```powershell
+web3bb seed-axelar-known --run runs/axelar/<timestamp>
+```
+
+This fetches and indexes the Immunefi pages, Code4rena reports, and Axelar ITS docs. Deployment/config repositories are added as URL stubs, and closed hypotheses are indexed as rejections.
+
 ### Seed Axelar Sample
 
 ```powershell
@@ -291,6 +334,11 @@ Writes:
 - `tracker/run_summary.md`
 
 `export-review-packet` creates `review_packet/` with scope notes, tracker exports, metadata, hypothesis markdown, selected tool output files, PoC notes, and `review_packet/chatgpt_packet.md`.
+
+The review packet also includes known issue corpus exports:
+
+- `tracker/known_sources.csv`
+- `tracker/known_sources.md`
 
 ## Building A Windows EXE
 

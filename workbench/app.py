@@ -62,6 +62,41 @@ class ImportLeadsIn(RunPathIn):
     file_path: str
 
 
+class KnownUrlIn(RunPathIn):
+    url: str
+    source_type: str
+    title: str
+    notes: str = ""
+
+
+class KnownFileIn(RunPathIn):
+    file_path: str
+    source_type: str
+    title: str = ""
+    notes: str = ""
+
+
+class KnownManualIn(RunPathIn):
+    title: str
+    source_type: str
+    text: str
+    notes: str = ""
+
+
+class KnownSearchIn(RunPathIn):
+    query: str
+
+
+class KnownLinkIn(RunPathIn):
+    hypothesis_id: str
+    source_id: int
+    notes: str = ""
+
+
+class CheckKnownIn(RunPathIn):
+    hypothesis_id: str
+
+
 class OpenPathIn(BaseModel):
     path: str
 
@@ -85,7 +120,9 @@ def bootstrap(run: str = "") -> dict:
         "hypotheses": rows_for_run(selected),
         "profiles": profiles_for_run(selected),
         "executions": executions_for_run(selected),
+        "known_sources": known_for_run(selected),
         "statuses": web3bb.HYPOTHESIS_STATUSES,
+        "known_source_types": web3bb.KNOWN_SOURCE_TYPES,
     }
 
 
@@ -243,6 +280,88 @@ def review_packet(payload: RunPathIn) -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.get("/api/known")
+def known(run: str = Query(...)) -> dict:
+    try:
+        return {"sources": web3bb.known_list(Path(run))}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/known/url")
+def known_url(payload: KnownUrlIn) -> dict:
+    try:
+        return dict(web3bb.known_add_url(Path(payload.run), payload.url, payload.source_type, payload.title, payload.notes))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/known/file")
+def known_file(payload: KnownFileIn) -> dict:
+    try:
+        title = payload.title or None
+        return dict(web3bb.known_import_file(Path(payload.run), Path(payload.file_path), payload.source_type, title, payload.notes))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/known/manual")
+def known_manual(payload: KnownManualIn) -> dict:
+    try:
+        return dict(web3bb.known_add_manual(Path(payload.run), payload.title, payload.source_type, payload.text, payload.notes))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/known/search")
+def known_search(payload: KnownSearchIn) -> dict:
+    try:
+        return {"matches": web3bb.known_search(Path(payload.run), payload.query)}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/known/check")
+def known_check(payload: CheckKnownIn) -> dict:
+    try:
+        return web3bb.check_known(Path(payload.run), payload.hypothesis_id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/known/link")
+def known_link(payload: KnownLinkIn) -> dict:
+    try:
+        return web3bb.link_known_issue(Path(payload.run), payload.hypothesis_id, payload.source_id, payload.notes)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/known/export")
+def known_export(payload: RunPathIn) -> dict:
+    try:
+        return web3bb.known_export(Path(payload.run))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/known/dedupe")
+def known_dedupe(payload: RunPathIn) -> dict:
+    try:
+        return web3bb.known_dedupe(Path(payload.run))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/known/seed-axelar")
+def known_seed_axelar(payload: RunPathIn) -> dict:
+    try:
+        rows = web3bb.seed_axelar_known_sources(Path(payload.run))
+        return {"seeded": [dict(row) for row in rows]}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 def rows_for_run(run_path: Path | None) -> list[dict]:
     if not run_path:
         return []
@@ -261,6 +380,15 @@ def profiles_for_run(run_path: Path | None) -> dict:
 
 def executions_for_run(run_path: Path | None) -> list[dict]:
     if not run_path:
+        return []
+
+
+def known_for_run(run_path: Path | None) -> list[dict]:
+    if not run_path:
+        return []
+    try:
+        return web3bb.known_list(run_path)
+    except Exception:
         return []
     try:
         return web3bb.tool_execution_history(run_path)

@@ -27,6 +27,7 @@
         <button data-tab="scope">Scope</button>
         <button data-tab="scan">Scan</button>
         <button data-tab="hypotheses">Hypotheses</button>
+        <button data-tab="known">Known Issues</button>
         <button data-tab="packet">Review Packet</button>
       </aside>
 
@@ -147,6 +148,56 @@
             <table>
               <thead><tr><th>ID</th><th>Title</th><th>Status</th><th>PoC</th><th>Validation</th><th>Gate</th><th>Next Action</th><th>Actions</th></tr></thead>
               <tbody id="hypotheses-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="known" class="tab">
+          <div class="section-head">
+            <h2>Known Issues</h2>
+            <div class="button-row">
+              <button id="known-refresh" type="button">Refresh</button>
+              <button id="known-export" type="button">Export</button>
+              <button id="known-dedupe" type="button">Dedupe</button>
+              <button id="known-seed-axelar" type="button">Seed Axelar URLs</button>
+            </div>
+          </div>
+          <form id="known-url-form" class="panel form-grid">
+            <label>Title <input name="title" required /></label>
+            <label>Source type <select name="source_type" class="known-type-select"></select></label>
+            <label class="wide">URL <input name="url" required /></label>
+            <label class="wide">Notes <input name="notes" /></label>
+            <button type="submit">Fetch/Index URL</button>
+          </form>
+          <form id="known-file-form" class="panel form-grid">
+            <label>Title <input name="title" /></label>
+            <label>Source type <select name="source_type" class="known-type-select"></select></label>
+            <label class="wide">File path <input name="file_path" required /></label>
+            <label class="wide">Notes <input name="notes" /></label>
+            <button type="submit">Import File</button>
+          </form>
+          <form id="known-manual-form" class="panel form-grid">
+            <label>Title <input name="title" required /></label>
+            <label>Source type <select name="source_type" class="known-type-select"></select></label>
+            <label class="wide">Manual note <textarea name="text" rows="5" required></textarea></label>
+            <label class="wide">Notes <input name="notes" /></label>
+            <button type="submit">Index Note</button>
+          </form>
+          <form id="known-search-form" class="panel inline-form">
+            <label>Search known corpus <input name="query" required placeholder="contract function impact terms" /></label>
+            <button type="submit">Search</button>
+          </form>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>ID</th><th>Title</th><th>Type</th><th>Status</th><th>URL / File</th><th>Chunks</th><th>Fetched</th></tr></thead>
+              <tbody id="known-sources-body"></tbody>
+            </table>
+          </div>
+          <h2 class="subhead">Search Results</h2>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Source</th><th>Type</th><th>Confidence</th><th>Recommendation</th><th>Snippet</th><th>Actions</th></tr></thead>
+              <tbody id="known-results-body"></tbody>
             </table>
           </div>
         </section>

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 import re
@@ -70,6 +71,7 @@ HYPOTHESIS_STATUSES = [
     "Report Candidate",
     "Submitted",
 ]
+KNOWN_SOURCE_TYPES = ["audit", "report", "docs", "github", "scope", "rejection", "manual"]
 
 
 def now_iso() -> str:
@@ -719,8 +721,386 @@ def fetch_page_text(url: str) -> str:
     return "\n".join(line for line in lines if line)
 
 
+def known_add_url(run_path: Path, url: str, source_type: str, title: str, notes: str = "") -> sqlite3.Row:
+    try:
+        text = fetch_page_text(url)
+        fetch_status = "fetched"
+    except Exception as exc:
+        text = f"{title}\n{url}\n{notes}"
+        fetch_status = "FETCH_FAILED"
+        notes = f"{notes}\nFETCH_FAILED: {exc}".strip()
+    return add_known_source(run_path, title, source_type, text, url=url, notes=notes, fetch_status=fetch_status)
+
+
+def known_import_file(run_path: Path, file_path: Path, source_type: str, title: str | None = None, notes: str = "") -> sqlite3.Row:
+    text = file_path.read_text(encoding="utf-8", errors="replace")
+    return add_known_source(run_path, title or file_path.stem, source_type, text, file_path=str(file_path), notes=notes, fetch_status="file")
+
+
+def known_add_manual(run_path: Path, title: str, source_type: str, text: str, notes: str = "") -> sqlite3.Row:
+    return add_known_source(run_path, title, source_type, text, notes=notes, fetch_status="manual")
+
+
+def add_known_source(
+    run_path: Path,
+    title: str,
+    source_type: str,
+    text: str,
+    url: str = "",
+    file_path: str = "",
+    notes: str = "",
+    fetch_status: str = "manual",
+    source_key: str = "",
+) -> sqlite3.Row:
+    source_type = validate_known_source_type(source_type)
+    clean_text = normalize_known_text(text)
+    if not clean_text:
+        clean_text = "\n".join(part for part in [title, url, file_path, notes] if part)
+    digest = text_hash(clean_text)
+    source_key = source_key or known_source_key(title, source_type, digest, url)
+    stamp = now_iso()
+    with run_db(run_path) as conn:
+        ensure_run_schema(conn)
+        existing = find_known_source_by_key(conn, source_key)
+        if existing:
+            if should_replace_known_source(existing["fetch_status"], fetch_status):
+                conn.execute(
+                    """
+                    UPDATE known_sources
+                    SET title = ?, url = ?, file_path = ?, source_type = ?, fetched_at = ?,
+                        text_hash = ?, notes = ?, fetch_status = ?, source_key = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        title.strip() or "Untitled known source",
+                        url,
+                        file_path,
+                        source_type,
+                        stamp,
+                        digest,
+                        notes,
+                        fetch_status,
+                        source_key,
+                        existing["id"],
+                    ),
+                )
+                replace_known_chunks(conn, existing["id"], title.strip() or "Untitled known source", source_type, clean_text)
+                conn.commit()
+            return conn.execute("SELECT * FROM known_sources WHERE id = ?", (existing["id"],)).fetchone()
+        existing = conn.execute("SELECT * FROM known_sources WHERE text_hash = ?", (digest,)).fetchone()
+        if existing:
+            if not existing["source_key"]:
+                conn.execute("UPDATE known_sources SET source_key = ? WHERE id = ?", (source_key, existing["id"]))
+                conn.commit()
+            return conn.execute("SELECT * FROM known_sources WHERE id = ?", (existing["id"],)).fetchone()
+        cursor = conn.execute(
+            """
+            INSERT INTO known_sources (title, url, file_path, source_type, fetched_at, text_hash, notes, fetch_status, source_key)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (title.strip() or "Untitled known source", url, file_path, source_type, stamp, digest, notes, fetch_status, source_key),
+        )
+        source_id = cursor.lastrowid
+        replace_known_chunks(conn, source_id, title.strip() or "Untitled known source", source_type, clean_text)
+        conn.commit()
+        return conn.execute("SELECT * FROM known_sources WHERE id = ?", (source_id,)).fetchone()
+
+
+def find_known_source_by_key(conn: sqlite3.Connection, source_key: str) -> sqlite3.Row | None:
+    existing = conn.execute("SELECT * FROM known_sources WHERE source_key = ? ORDER BY id LIMIT 1", (source_key,)).fetchone()
+    if existing:
+        return existing
+    for row in conn.execute("SELECT * FROM known_sources WHERE source_key = '' OR source_key IS NULL ORDER BY id").fetchall():
+        inferred = infer_existing_source_key(conn, dict(row))
+        if inferred == source_key:
+            conn.execute("UPDATE known_sources SET source_key = ? WHERE id = ?", (source_key, row["id"]))
+            return conn.execute("SELECT * FROM known_sources WHERE id = ?", (row["id"],)).fetchone()
+    return None
+
+
+def replace_known_chunks(conn: sqlite3.Connection, source_id: int, title: str, source_type: str, text: str) -> None:
+    chunk_ids = [row["id"] for row in conn.execute("SELECT id FROM known_chunks WHERE source_id = ?", (source_id,)).fetchall()]
+    if chunk_ids and known_fts_available(conn):
+        placeholders = ",".join("?" for _ in chunk_ids)
+        conn.execute(f"DELETE FROM known_chunks_fts WHERE rowid IN ({placeholders})", chunk_ids)
+    conn.execute("DELETE FROM known_chunks WHERE source_id = ?", (source_id,))
+    for idx, chunk in enumerate(chunk_text(text)):
+        chunk_cursor = conn.execute(
+            "INSERT INTO known_chunks (source_id, chunk_index, text) VALUES (?, ?, ?)",
+            (source_id, idx, chunk),
+        )
+        if known_fts_available(conn):
+            conn.execute(
+                "INSERT INTO known_chunks_fts (rowid, source_id, title, source_type, text) VALUES (?, ?, ?, ?, ?)",
+                (chunk_cursor.lastrowid, source_id, title, source_type, chunk),
+            )
+
+
+def known_list(run_path: Path) -> list[dict]:
+    index_closed_hypotheses(run_path)
+    with run_db(run_path) as conn:
+        ensure_run_schema(conn)
+        rows = conn.execute(
+            """
+            SELECT s.*, COUNT(c.id) AS chunk_count
+            FROM known_sources s
+            LEFT JOIN known_chunks c ON c.source_id = s.id
+            GROUP BY s.id
+            ORDER BY s.fetched_at DESC, s.id DESC
+            """
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def known_search(run_path: Path, query: str, limit: int = 20) -> list[dict]:
+    index_closed_hypotheses(run_path)
+    query = query.strip()
+    if not query:
+        return []
+    with run_db(run_path) as conn:
+        ensure_run_schema(conn)
+        if known_fts_available(conn):
+            try:
+                return known_search_fts(conn, query, limit)
+            except sqlite3.Error:
+                pass
+        return known_search_like(conn, query, limit)
+
+
+def known_search_fts(conn: sqlite3.Connection, query: str, limit: int) -> list[dict]:
+    fts_query = " OR ".join(f'"{term}"' for term in search_terms(query)[:12])
+    rows = conn.execute(
+        """
+        SELECT s.id AS source_id, s.title, s.url, s.file_path, s.source_type, c.text AS snippet,
+               bm25(known_chunks_fts) AS rank
+        FROM known_chunks_fts
+        JOIN known_chunks c ON c.id = known_chunks_fts.rowid
+        JOIN known_sources s ON s.id = c.source_id
+        WHERE known_chunks_fts MATCH ?
+        ORDER BY rank
+        LIMIT ?
+        """,
+        (fts_query, limit),
+    ).fetchall()
+    return [decorate_known_match(dict(row), query) for row in rows]
+
+
+def known_search_like(conn: sqlite3.Connection, query: str, limit: int) -> list[dict]:
+    terms = search_terms(query)[:12]
+    clauses = " OR ".join(["LOWER(c.text) LIKE ? OR LOWER(s.title) LIKE ?" for _ in terms])
+    params = []
+    for term in terms:
+        like = f"%{term.lower()}%"
+        params.extend([like, like])
+    rows = conn.execute(
+        f"""
+        SELECT s.id AS source_id, s.title, s.url, s.file_path, s.source_type, c.text AS snippet
+        FROM known_chunks c
+        JOIN known_sources s ON s.id = c.source_id
+        WHERE {clauses}
+        ORDER BY s.fetched_at DESC, s.id DESC, c.chunk_index
+        LIMIT ?
+        """,
+        (*params, limit),
+    ).fetchall()
+    return [decorate_known_match(dict(row), query) for row in rows]
+
+
+def check_known(run_path: Path, hypothesis_id: str) -> dict:
+    row = dict(get_hypothesis(run_path, hypothesis_id))
+    query = " ".join(
+        value
+        for value in [
+            row.get("title", ""),
+            row.get("contract", ""),
+            row.get("function", ""),
+            row.get("hypothesis", ""),
+            row.get("impact_mapping", ""),
+        ]
+        if value
+    )
+    matches = [
+        score_known_match_for_hypothesis(match, row)
+        for match in known_search(run_path, query, limit=20)
+    ]
+    self_history_matches = [match for match in matches if match.get("match_kind") == "self-history match"]
+    public_known_matches = [
+        match
+        for match in matches
+        if match.get("match_kind") == "public known match" and match.get("confidence") in {"High", "Medium"}
+    ]
+    weak_context_matches = [
+        match
+        for match in matches
+        if match not in self_history_matches and match not in public_known_matches
+    ]
+    recommendation = check_known_recommendation(self_history_matches, public_known_matches)
+    stamp = now_iso()
+    note = (
+        f"{stamp} known-check: {recommendation}; "
+        f"{len(self_history_matches)} self-history, {len(public_known_matches)} public, "
+        f"{len(weak_context_matches)} weak context matches."
+    )
+    update_hypothesis(
+        run_path,
+        hypothesis_id,
+        {
+            "known_issue_check": note,
+            "notes": f"{row.get('notes', '').rstrip()}\n{note}".strip(),
+        },
+    )
+    return {
+        "hypothesis_id": hypothesis_id,
+        "query": query,
+        "self_history_matches": self_history_matches,
+        "public_known_matches": public_known_matches,
+        "weak_context_matches": weak_context_matches,
+        "matches": matches,
+        "recommendation": recommendation,
+    }
+
+
+def link_known_issue(run_path: Path, hypothesis_id: str, source_id: int, notes: str = "") -> dict:
+    stamp = now_iso()
+    with run_db(run_path) as conn:
+        ensure_run_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO known_hypothesis_links (hypothesis_id, source_id, notes, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (hypothesis_id, source_id, notes, stamp),
+        )
+        conn.commit()
+    return {"hypothesis_id": hypothesis_id, "source_id": source_id, "notes": notes, "created_at": stamp}
+
+
+def known_export(run_path: Path) -> dict:
+    index_closed_hypotheses(run_path)
+    tracker = run_path / "tracker"
+    tracker.mkdir(parents=True, exist_ok=True)
+    sources = known_list(run_path)
+    csv_path = tracker / "known_sources.csv"
+    md_path = tracker / "known_sources.md"
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+        fieldnames = ["id", "title", "url", "file_path", "source_type", "fetch_status", "fetched_at", "text_hash", "notes", "chunk_count"]
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(sources)
+    lines = ["# Known Issue Corpus", ""]
+    for source in sources:
+        loc = source.get("url") or source.get("file_path") or ""
+        lines.extend(
+            [
+                f"## {source.get('id')} - {source.get('title', '')}",
+                f"- Type: {source.get('source_type', '')}",
+                f"- Fetch Status: {source.get('fetch_status', '')}",
+                f"- Location: {loc}",
+                f"- Fetched: {source.get('fetched_at', '')}",
+                f"- Chunks: {source.get('chunk_count', 0)}",
+                f"- Notes: {source.get('notes', '')}",
+                "",
+            ]
+        )
+    md_path.write_text("\n".join(lines), encoding="utf-8")
+    return {"known_csv": str(csv_path), "known_summary": str(md_path), "sources": len(sources)}
+
+
+def known_dedupe(run_path: Path) -> dict:
+    with run_db(run_path) as conn:
+        ensure_run_schema(conn)
+        rows = [dict(row) for row in conn.execute("SELECT * FROM known_sources ORDER BY id").fetchall()]
+        groups: dict[str, list[dict]] = {}
+        for row in rows:
+            key = infer_existing_source_key(conn, row) if row.get("source_type") == "rejection" else row.get("source_key") or infer_existing_source_key(conn, row)
+            conn.execute("UPDATE known_sources SET source_key = ? WHERE id = ?", (key, row["id"]))
+            row["source_key"] = key
+            groups.setdefault(key, []).append(row)
+        removed = 0
+        merged = 0
+        for key, items in groups.items():
+            if len(items) < 2:
+                continue
+            winner = sorted(items, key=known_source_preference, reverse=True)[0]
+            loser_ids = [item["id"] for item in items if item["id"] != winner["id"]]
+            for loser_id in loser_ids:
+                delete_known_source(conn, loser_id)
+                removed += 1
+            merged += 1
+        conn.commit()
+    return {"merged_groups": merged, "removed_sources": removed}
+
+
+def seed_axelar_known_sources(run_path: Path) -> list[sqlite3.Row]:
+    fetch_seeds = [
+        ("Axelar Immunefi scope page", "scope", "https://immunefi.com/bug-bounty/axelarnetwork/scope/", "Immunefi Axelar scope page URL seed."),
+        ("Axelar Immunefi resources page", "scope", "https://immunefi.com/bug-bounty/axelarnetwork/resources/", "Immunefi Axelar resources page URL seed."),
+        ("Axelar Immunefi information page", "scope", "https://immunefi.com/bug-bounty/axelarnetwork/information/", "Immunefi Axelar information page URL seed."),
+        ("Code4rena 2023 Axelar report", "report", "https://code4rena.com/reports/2023-07-axelar", "Code4rena public report URL seed."),
+        ("Code4rena 2024 Axelar report", "report", "https://code4rena.com/reports/2024-08-axelar-network", "Code4rena public report URL seed."),
+        ("Axelar ITS docs", "docs", "https://docs.axelar.dev/dev/send-tokens/interchain-tokens/intro/", "Axelar interchain token service docs URL seed."),
+    ]
+    note_seeds = [
+        ("axelar-contract-deployments repo", "github", "https://github.com/axelarnetwork/axelar-contract-deployments", "Deployment registry repo URL seed."),
+        ("axelar-configs repo", "github", "https://github.com/axelarnetwork/axelar-configs", "Configs repo URL seed."),
+    ]
+    rows = [known_add_url(run_path, url, source_type, title, notes) for title, source_type, url, notes in fetch_seeds]
+    rows.extend(
+        add_known_source(
+            run_path,
+            title,
+            source_type,
+            f"{title}\n{url}\n{notes}",
+            url=url,
+            notes=notes,
+            fetch_status="stub",
+        )
+        for title, source_type, url, notes in note_seeds
+    )
+    index_closed_hypotheses(run_path)
+    return rows
+
+
+def index_closed_hypotheses(run_path: Path) -> None:
+    try:
+        rows = [dict(row) for row in list_hypotheses(run_path)]
+    except sqlite3.Error:
+        return
+    for row in rows:
+        status = row.get("status", "")
+        if not (str(status).startswith("Rejected") or row.get("closure_notes")):
+            continue
+        text = "\n".join(
+            str(row.get(key, ""))
+            for key in [
+                "id",
+                "title",
+                "status",
+                "contract",
+                "function",
+                "hypothesis",
+                "scope_mapping",
+                "impact_mapping",
+                "known_issue_check",
+                "notes",
+                "closure_notes",
+            ]
+            if row.get(key)
+        )
+        add_known_source(
+            run_path,
+            f"{row.get('id')} closed hypothesis - {row.get('title', '')}",
+            "rejection",
+            text,
+            notes="Auto-indexed from closed/rejected tracker hypothesis.",
+            fetch_status="rejection",
+            source_key=f"rejection:{row.get('id', '').strip().lower()}",
+        )
+
+
 def export_review_packet(run_path: Path, hypothesis_ids: Iterable[str] | None = None) -> dict:
     exports = export_run(run_path)
+    known_exports = known_export(run_path)
     packet = run_path / "review_packet"
     if packet.exists():
         shutil.rmtree(packet)
@@ -735,6 +1115,8 @@ def export_review_packet(run_path: Path, hypothesis_ids: Iterable[str] | None = 
         Path("tracker") / "run_summary.md",
         Path("metadata") / "project_detect.json",
         Path("metadata") / "profiles.json",
+        Path("tracker") / "known_sources.csv",
+        Path("tracker") / "known_sources.md",
     ]:
         copy_review_file(run_path, packet, rel, included)
 
@@ -755,7 +1137,7 @@ def export_review_packet(run_path: Path, hypothesis_ids: Iterable[str] | None = 
     packet_md = packet / "chatgpt_packet.md"
     packet_md.write_text(build_chatgpt_packet(run_path, hypotheses, included), encoding="utf-8")
     included.append(str(packet_md.relative_to(packet)))
-    return {"review_packet": str(packet), "chatgpt_packet": str(packet_md), "included_files": included, **exports}
+    return {"review_packet": str(packet), "chatgpt_packet": str(packet_md), "included_files": included, **exports, **known_exports}
 
 
 def copy_review_file(run_path: Path, packet: Path, rel: Path, included: list[str]) -> None:
@@ -774,6 +1156,7 @@ def build_chatgpt_packet(run_path: Path, hypotheses: list[dict], included: list[
     open_rows = [row for row in hypotheses if not str(row.get("status", "")).startswith("Rejected")]
     closed_rows = [row for row in hypotheses if str(row.get("status", "")).startswith("Rejected")]
     executions = tool_execution_history(run_path)
+    known_sources = known_list(run_path)
     lines = [
         "# ChatGPT Review Packet",
         "",
@@ -796,6 +1179,16 @@ def build_chatgpt_packet(run_path: Path, hypotheses: list[dict], included: list[
             f"- {execution['tool']} exit {execution['exit_code']}: {execution.get('parsed_summary', '')}"
         )
         lines.extend(tool_snippets(execution))
+    lines.extend(["", "## Known Issue Corpus"])
+    if known_sources:
+        for source in known_sources[:25]:
+            loc = source.get("url") or source.get("file_path") or ""
+            lines.append(
+                f"- {source.get('title', '')} ({source.get('source_type', '')}; "
+                f"{source.get('fetch_status', '')}; chunks: {source.get('chunk_count', 0)}) {loc}"
+            )
+    else:
+        lines.append("- No known issue sources indexed.")
     lines.extend(
         [
             "",
@@ -932,8 +1325,44 @@ def ensure_run_schema(conn: sqlite3.Connection) -> None:
             body TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS known_sources (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            url TEXT NOT NULL DEFAULT '',
+            file_path TEXT NOT NULL DEFAULT '',
+            source_type TEXT NOT NULL,
+            fetched_at TEXT NOT NULL,
+            text_hash TEXT NOT NULL UNIQUE,
+            fetch_status TEXT NOT NULL DEFAULT 'manual',
+            source_key TEXT NOT NULL DEFAULT '',
+            notes TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS known_chunks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id INTEGER NOT NULL,
+            chunk_index INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            FOREIGN KEY(source_id) REFERENCES known_sources(id)
+        );
+        CREATE TABLE IF NOT EXISTS known_hypothesis_links (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            hypothesis_id TEXT NOT NULL,
+            source_id INTEGER NOT NULL,
+            notes TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(source_id) REFERENCES known_sources(id)
+        );
         """
     )
+    try:
+        conn.execute(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS known_chunks_fts
+            USING fts5(source_id UNINDEXED, title, source_type UNINDEXED, text)
+            """
+        )
+    except sqlite3.Error:
+        pass
     ensure_columns(
         conn,
         "hypotheses",
@@ -941,6 +1370,14 @@ def ensure_run_schema(conn: sqlite3.Connection) -> None:
             "status": "TEXT NOT NULL DEFAULT 'New'",
             "gate_decision": "TEXT NOT NULL DEFAULT ''",
             "closure_notes": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    ensure_columns(
+        conn,
+        "known_sources",
+        {
+            "fetch_status": "TEXT NOT NULL DEFAULT 'manual'",
+            "source_key": "TEXT NOT NULL DEFAULT ''",
         },
     )
     conn.commit()
@@ -1196,6 +1633,365 @@ def hypothesis_fields() -> list[str]:
         "created_at",
         "updated_at",
     ]
+
+
+def validate_known_source_type(source_type: str) -> str:
+    cleaned = source_type.strip().lower()
+    if cleaned not in KNOWN_SOURCE_TYPES:
+        raise ValueError(f"Invalid known source type: {source_type}. Allowed: {', '.join(KNOWN_SOURCE_TYPES)}")
+    return cleaned
+
+
+def known_source_key(title: str, source_type: str, digest: str, url: str = "") -> str:
+    normalized = normalize_url_key(url)
+    if normalized:
+        return f"url:{normalized}"
+    return f"{source_type}:{slugify(title)}:{digest}"
+
+
+def normalize_url_key(url: str) -> str:
+    cleaned = url.strip().lower()
+    if not cleaned:
+        return ""
+    cleaned = re.sub(r"^https?://", "", cleaned)
+    cleaned = cleaned.split("#", 1)[0].split("?", 1)[0].rstrip("/")
+    cleaned = re.sub(r"/+", "/", cleaned)
+    return cleaned
+
+
+def infer_existing_source_key(conn: sqlite3.Connection, row: dict) -> str:
+    if row.get("source_type") == "rejection":
+        rejection_id = extract_hypothesis_id(" ".join(str(row.get(key, "")) for key in ("title", "notes", "source_key")))
+        if not rejection_id:
+            chunk = conn.execute(
+                "SELECT text FROM known_chunks WHERE source_id = ? ORDER BY chunk_index LIMIT 1",
+                (row["id"],),
+            ).fetchone()
+            rejection_id = extract_hypothesis_id(chunk["text"] if chunk else "")
+        if rejection_id:
+            return f"rejection:{rejection_id}"
+    url = row.get("url") or extract_first_url(row.get("notes", ""))
+    if not url:
+        chunk = conn.execute(
+            "SELECT text FROM known_chunks WHERE source_id = ? ORDER BY chunk_index LIMIT 1",
+            (row["id"],),
+        ).fetchone()
+        url = extract_first_url(chunk["text"] if chunk else "")
+    if url:
+        return f"url:{normalize_url_key(url)}"
+    return known_source_key(row.get("title", ""), row.get("source_type", "manual"), row.get("text_hash", ""), "")
+
+
+def extract_hypothesis_id(text: str) -> str:
+    match = re.search(r"\bH-\d{1,6}\b", text or "", flags=re.IGNORECASE)
+    return match.group(0).lower() if match else ""
+
+
+def extract_first_url(text: str) -> str:
+    match = re.search(r"https?://[^\s)>\]]+", text or "")
+    return match.group(0).rstrip(".,;") if match else ""
+
+
+def known_source_preference(row: dict) -> tuple[int, int, int, str]:
+    status_score = {
+        "fetched": 50,
+        "file": 40,
+        "manual": 30,
+        "rejection": 30,
+        "stub": 10,
+        "FETCH_FAILED": 5,
+    }.get(row.get("fetch_status", ""), 0)
+    has_url = 1 if row.get("url") else 0
+    richness = len(str(row.get("notes", ""))) + len(str(row.get("text_hash", "")))
+    fetched_at = str(row.get("fetched_at", ""))
+    return (status_score, has_url, richness, fetched_at)
+
+
+def should_replace_known_source(existing_status: str, new_status: str) -> bool:
+    existing = {"fetch_status": existing_status, "id": 0}
+    new = {"fetch_status": new_status, "id": 1}
+    return known_source_preference(new) > known_source_preference(existing)
+
+
+def delete_known_source(conn: sqlite3.Connection, source_id: int) -> None:
+    chunk_ids = [row["id"] for row in conn.execute("SELECT id FROM known_chunks WHERE source_id = ?", (source_id,)).fetchall()]
+    if chunk_ids and known_fts_available(conn):
+        placeholders = ",".join("?" for _ in chunk_ids)
+        conn.execute(f"DELETE FROM known_chunks_fts WHERE rowid IN ({placeholders})", chunk_ids)
+    conn.execute("DELETE FROM known_chunks WHERE source_id = ?", (source_id,))
+    conn.execute("DELETE FROM known_hypothesis_links WHERE source_id = ?", (source_id,))
+    conn.execute("DELETE FROM known_sources WHERE id = ?", (source_id,))
+
+
+def normalize_known_text(text: str) -> str:
+    lines = [re.sub(r"\s+", " ", line).strip() for line in text.replace("\x00", "").splitlines()]
+    return "\n".join(line for line in lines if line)
+
+
+def text_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+
+
+def chunk_text(text: str, size: int = 1200, overlap: int = 160) -> list[str]:
+    words = text.split()
+    if not words:
+        return []
+    chunks = []
+    step = max(1, size - overlap)
+    for start in range(0, len(words), step):
+        chunk = " ".join(words[start:start + size]).strip()
+        if chunk:
+            chunks.append(chunk)
+    return chunks
+
+
+def known_fts_available(conn: sqlite3.Connection) -> bool:
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'known_chunks_fts'"
+    ).fetchone()
+    return row is not None
+
+
+def search_terms(query: str) -> list[str]:
+    stop = {
+        "the",
+        "and",
+        "for",
+        "with",
+        "from",
+        "that",
+        "this",
+        "into",
+        "can",
+        "may",
+        "using",
+        "when",
+        "then",
+        "than",
+        "will",
+        "are",
+        "not",
+        "issue",
+        "hypothesis",
+    }
+    terms = []
+    for term in re.findall(r"[A-Za-z0-9_]{3,}", query.lower()):
+        if term not in stop and term not in terms:
+            terms.append(term)
+    return terms or [query.strip().lower()]
+
+
+def decorate_known_match(row: dict, query: str) -> dict:
+    snippet = compact_snippet(row.get("snippet", ""), search_terms(query))
+    row["snippet"] = snippet
+    row["confidence"] = known_confidence(row, query)
+    row["recommendation"] = known_match_recommendation(row["confidence"])
+    return row
+
+
+def compact_snippet(text: str, terms: list[str], radius: int = 180) -> str:
+    clean = re.sub(r"\s+", " ", text).strip()
+    lower = clean.lower()
+    positions = [lower.find(term.lower()) for term in terms if lower.find(term.lower()) >= 0]
+    if not positions:
+        return clean[: radius * 2]
+    pos = min(positions)
+    start = max(0, pos - radius)
+    end = min(len(clean), pos + radius)
+    prefix = "..." if start else ""
+    suffix = "..." if end < len(clean) else ""
+    return f"{prefix}{clean[start:end]}{suffix}"
+
+
+def known_confidence(row: dict, query: str) -> str:
+    terms = search_terms(query)
+    haystack = f"{row.get('title', '')} {row.get('snippet', '')}".lower()
+    hits = sum(1 for term in terms if term.lower() in haystack)
+    if hits >= 5 or (hits >= 3 and row.get("source_type") in {"audit", "report", "rejection"}):
+        return "High"
+    if hits >= 2:
+        return "Medium"
+    return "Low"
+
+
+def known_match_recommendation(confidence: str) -> str:
+    if confidence == "High":
+        return "likely duplicate"
+    if confidence == "Medium":
+        return "needs manual review"
+    return "proceed"
+
+
+def known_recommendation(matches: list[dict]) -> str:
+    confidences = [match.get("confidence") for match in matches]
+    if "High" in confidences:
+        return "likely duplicate"
+    if "Medium" in confidences:
+        return "needs manual review"
+    return "proceed"
+
+
+def score_known_match_for_hypothesis(match: dict, hypothesis: dict) -> dict:
+    text = f"{match.get('title', '')} {match.get('snippet', '')}".lower()
+    features = []
+    contract = str(hypothesis.get("contract", "")).strip().lower()
+    function = str(hypothesis.get("function", "")).strip().lower()
+    if contract and contract in text:
+        features.append("same contract name")
+    if function and function in text:
+        features.append("same function name")
+    mechanism_overlap = keyword_overlap(bug_mechanism_terms(hypothesis), text)
+    if mechanism_overlap >= 2:
+        features.append("same bug mechanism keywords")
+    impact_overlap = keyword_overlap(impact_terms(hypothesis), text)
+    if impact_overlap >= 1:
+        features.append("same impact class")
+    condition_overlap = keyword_overlap(asset_condition_terms(hypothesis), text)
+    if condition_overlap >= 1:
+        features.append("same asset/config condition")
+
+    boilerplate = is_boilerplate_known_text(text)
+    self_history = is_self_history_match(match, hypothesis)
+    if self_history:
+        confidence = "High"
+        kind = "self-history match"
+        recommendation = "self-history match"
+    else:
+        has_mechanism = "same bug mechanism keywords" in features
+        has_anchor = any(
+            feature in features
+            for feature in ("same function name", "same contract name", "same impact class")
+        )
+        if boilerplate:
+            confidence = "Low"
+        elif has_mechanism and has_anchor:
+            confidence = "High"
+        elif len(features) == 1:
+            confidence = "Medium"
+        elif "same contract name" in features and "same asset/config condition" in features:
+            confidence = "Medium"
+        elif len(features) >= 2:
+            confidence = "Medium"
+        else:
+            confidence = "Low"
+        kind = "public known match" if confidence in {"High", "Medium"} else "weak context match"
+        recommendation = known_match_recommendation(confidence)
+    scored = dict(match)
+    scored["feature_matches"] = features
+    scored["confidence"] = confidence
+    scored["recommendation"] = recommendation
+    scored["match_kind"] = kind
+    return scored
+
+
+def check_known_recommendation(self_history_matches: list[dict], public_known_matches: list[dict]) -> str:
+    high_public = any(match.get("confidence") == "High" for match in public_known_matches)
+    if high_public:
+        return "likely public duplicate"
+    if self_history_matches and not public_known_matches:
+        return "self-history match; no strong public duplicate"
+    if self_history_matches and public_known_matches:
+        return "self-history match; public matches need manual review"
+    if public_known_matches:
+        return "needs manual review"
+    return "proceed"
+
+
+def is_self_history_match(match: dict, hypothesis: dict) -> bool:
+    if match.get("source_type") != "rejection":
+        return False
+    hypothesis_id = str(hypothesis.get("id", "")).lower()
+    title = str(match.get("title", "")).lower()
+    return bool(hypothesis_id and hypothesis_id in title)
+
+
+def bug_mechanism_terms(hypothesis: dict) -> list[str]:
+    text = " ".join(
+        str(hypothesis.get(key, ""))
+        for key in ["title", "hypothesis", "notes", "known_issue_check"]
+    )
+    mechanism_words = {
+        "reentrancy",
+        "oracle",
+        "stale",
+        "rounding",
+        "precision",
+        "overflow",
+        "underflow",
+        "reimbursement",
+        "accounting",
+        "mismatch",
+        "fee",
+        "deflationary",
+        "authorization",
+        "access",
+        "signature",
+        "replay",
+        "slippage",
+        "liquidation",
+        "donation",
+        "inflation",
+        "transfer",
+        "lock",
+        "unlock",
+        "express",
+    }
+    return [term for term in search_terms(text) if term in mechanism_words]
+
+
+def impact_terms(hypothesis: dict) -> list[str]:
+    text = " ".join(str(hypothesis.get(key, "")) for key in ["impact_mapping", "hypothesis", "title"]).lower()
+    classes = []
+    for terms in [
+        {"loss", "funds", "theft", "steal", "drain"},
+        {"insolvency", "undercollateralized", "bad", "debt"},
+        {"dos", "denial", "griefing", "stuck"},
+        {"governance", "admin", "privilege"},
+        {"price", "oracle", "manipulation"},
+    ]:
+        if any(term in text for term in terms):
+            classes.extend(terms)
+    return sorted(classes)
+
+
+def asset_condition_terms(hypothesis: dict) -> list[str]:
+    text = " ".join(str(hypothesis.get(key, "")) for key in ["title", "hypothesis", "scope_mapping", "impact_mapping"]).lower()
+    condition_words = {
+        "fee",
+        "fee-on-transfer",
+        "deflationary",
+        "rebasing",
+        "tokenmanager",
+        "token",
+        "lock_unlock_fee",
+        "custom",
+        "scoped",
+        "profile",
+        "asset",
+        "manager",
+        "exempt",
+    }
+    return [term for term in search_terms(text) if term in condition_words]
+
+
+def keyword_overlap(terms: list[str], text: str) -> int:
+    lower = text.lower()
+    return sum(1 for term in set(terms) if term and term.lower() in lower)
+
+
+def is_boilerplate_known_text(text: str) -> bool:
+    boilerplate = [
+        "gas optimization",
+        "gas optimizations",
+        "non-critical",
+        "quality assurance",
+        "informational",
+        "low risk",
+        "contest details",
+        "overview",
+    ]
+    security_terms = ["loss", "funds", "drain", "theft", "reentrancy", "oracle", "authorization", "accounting"]
+    return any(term in text for term in boilerplate) and not any(term in text for term in security_terms)
 
 
 def validate_hypothesis_status(status: str) -> str:
