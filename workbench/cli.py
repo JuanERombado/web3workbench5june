@@ -148,8 +148,14 @@ def main() -> None:
     known_export = subparsers.add_parser("known-export")
     known_export.add_argument("--run", required=True)
 
+    known_intel = subparsers.add_parser("known-intel")
+    known_intel.add_argument("--run", required=True)
+
     known_dedupe = subparsers.add_parser("known-dedupe")
     known_dedupe.add_argument("--run", required=True)
+
+    prepare_intel = subparsers.add_parser("prepare-intel")
+    prepare_intel.add_argument("--run", required=True)
 
     check_known = subparsers.add_parser("check-known")
     check_known.add_argument("--run", required=True)
@@ -235,8 +241,14 @@ def main() -> None:
     if args.command_name == "known-export":
         print_json(web3bb.known_export(Path(args.run)))
         return
+    if args.command_name == "known-intel":
+        print_json(web3bb.known_intel(Path(args.run)))
+        return
     if args.command_name == "known-dedupe":
         print_json(web3bb.known_dedupe(Path(args.run)))
+        return
+    if args.command_name == "prepare-intel":
+        print_json(web3bb.prepare_intel(Path(args.run)))
         return
     if args.command_name == "check-known":
         print_json(web3bb.check_known(Path(args.run), args.id))

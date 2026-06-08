@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import tempfile
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -14,6 +15,7 @@ from . import web3bb
 
 
 APP_DIR = Path(__file__).parent
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Web3 Bug Bounty Workbench")
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
@@ -121,6 +123,7 @@ def bootstrap(run: str = "") -> dict:
         "profiles": profiles_for_run(selected),
         "executions": executions_for_run(selected),
         "known_sources": known_for_run(selected),
+        "run_overview": overview_for_run(selected),
         "statuses": web3bb.HYPOTHESIS_STATUSES,
         "known_source_types": web3bb.KNOWN_SOURCE_TYPES,
     }
@@ -280,6 +283,18 @@ def review_packet(payload: RunPathIn) -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.post("/api/prepare-intel")
+def prepare_intel(payload: dict | None = Body(default=None), run: str = Query("")) -> dict:
+    run_path_text = str((payload or {}).get("run") or run).strip()
+    if not run_path_text:
+        raise HTTPException(status_code=400, detail="Run path is required.")
+    try:
+        return web3bb.prepare_intel(Path(run_path_text))
+    except Exception as exc:
+        logger.exception("prepare-intel failed for run %s", run_path_text)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/api/known")
 def known(run: str = Query(...)) -> dict:
     try:
@@ -345,6 +360,14 @@ def known_export(payload: RunPathIn) -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.post("/api/known/intel")
+def known_intel(payload: RunPathIn) -> dict:
+    try:
+        return web3bb.known_intel(Path(payload.run))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/api/known/dedupe")
 def known_dedupe(payload: RunPathIn) -> dict:
     try:
@@ -381,6 +404,10 @@ def profiles_for_run(run_path: Path | None) -> dict:
 def executions_for_run(run_path: Path | None) -> list[dict]:
     if not run_path:
         return []
+    try:
+        return web3bb.tool_execution_history(run_path)
+    except Exception:
+        return []
 
 
 def known_for_run(run_path: Path | None) -> list[dict]:
@@ -390,10 +417,29 @@ def known_for_run(run_path: Path | None) -> list[dict]:
         return web3bb.known_list(run_path)
     except Exception:
         return []
-    try:
-        return web3bb.tool_execution_history(run_path)
-    except Exception:
-        return []
+
+
+def overview_for_run(run_path: Path | None) -> dict:
+    if not run_path:
+        return {}
+    metadata = web3bb.read_json(run_path / "metadata" / "run_metadata.json") if (run_path / "metadata" / "run_metadata.json").exists() else {}
+    hypotheses = rows_for_run(run_path)
+    known_sources = known_for_run(run_path)
+    executions = executions_for_run(run_path)
+    status_counts: dict[str, int] = {}
+    for row in hypotheses:
+        status = row.get("status", "New")
+        status_counts[status] = status_counts.get(status, 0) + 1
+    latest = executions[0] if executions else {}
+    return {
+        "target_name": metadata.get("target_name", ""),
+        "program_url": metadata.get("program_url", ""),
+        "run_path": str(run_path),
+        "hypothesis_count": len(hypotheses),
+        "status_counts": status_counts,
+        "known_source_count": len(known_sources),
+        "latest_scan_summary": latest.get("parsed_summary", "No scans recorded."),
+    }
 
 
 async def resolve_source(source_path: str, source_upload: UploadFile | None) -> Path:

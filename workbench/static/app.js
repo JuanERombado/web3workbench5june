@@ -7,6 +7,8 @@ const state = {
   known_sources: [],
   known_source_types: [],
   known_matches: [],
+  run_overview: {},
+  last_packet: {},
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -32,6 +34,7 @@ async function load() {
 
 function render() {
   renderRuns();
+  renderOverview();
   renderProfiles();
   renderStatuses();
   renderKnownTypes();
@@ -51,7 +54,7 @@ function renderRuns() {
       <td>${escapeHtml(run.latest_status)}</td>
       <td class="actions">
         <button type="button" data-select-run="${escapeAttr(run.run_path)}">Open Run</button>
-        <button type="button" data-export-packet="${escapeAttr(run.run_path)}">Export Packet</button>
+        <button type="button" data-prepare-run="${escapeAttr(run.run_path)}">Prepare Packet</button>
       </td>
     </tr>
   `).join("");
@@ -59,15 +62,34 @@ function renderRuns() {
     button.addEventListener("click", async () => {
       currentRun.value = button.dataset.selectRun;
       await load();
-      showTab("scope");
+      showTab("dashboard");
     });
   });
-  document.querySelectorAll("[data-export-packet]").forEach((button) => {
+  document.querySelectorAll("[data-prepare-run]").forEach((button) => {
     button.addEventListener("click", async () => {
-      currentRun.value = button.dataset.exportPacket;
-      await exportPacket();
+      currentRun.value = button.dataset.prepareRun;
+      await prepareIntel();
     });
   });
+}
+
+function renderOverview() {
+  const overview = state.run_overview || {};
+  if (!overview.run_path) {
+    $("#overview-body").innerHTML = `<div class="muted-box">Select a run to see the overview.</div>`;
+    return;
+  }
+  const statuses = Object.entries(overview.status_counts || {})
+    .map(([status, count]) => `${escapeHtml(status)}: ${count}`)
+    .join("<br>") || "None";
+  $("#overview-body").innerHTML = `
+    <div><strong>Target</strong><span>${escapeHtml(overview.target_name)}</span></div>
+    <div><strong>Program URL</strong><span>${escapeHtml(overview.program_url)}</span></div>
+    <div><strong>Run Path</strong><span>${escapeHtml(overview.run_path)}</span></div>
+    <div><strong>Hypotheses</strong><span>${overview.hypothesis_count || 0}<br>${statuses}</span></div>
+    <div><strong>Known Sources</strong><span>${overview.known_source_count || 0}</span></div>
+    <div><strong>Latest Scan</strong><span>${escapeHtml(overview.latest_scan_summary || "No scans recorded.")}</span></div>
+  `;
 }
 
 function renderProfiles() {
@@ -212,10 +234,14 @@ function showTab(id) {
 document.querySelectorAll(".nav button").forEach((button) => {
   button.addEventListener("click", () => showTab(button.dataset.tab));
 });
+document.querySelectorAll("[data-tab-jump]").forEach((button) => {
+  button.addEventListener("click", () => showTab(button.dataset.tabJump));
+});
 
 $("#refresh-all").addEventListener("click", () => load().catch(fail));
 $("#dashboard-refresh").addEventListener("click", () => load().catch(fail));
-$("#open-run-folder").addEventListener("click", async () => {
+$("#dashboard-prepare-intel").addEventListener("click", () => prepareIntel().catch(fail));
+$("#dashboard-open-folder").addEventListener("click", async () => {
   try {
     await postJson("/api/open-path", { path: requireRun() });
   } catch (error) {
@@ -360,10 +386,18 @@ $("#export-tracker").addEventListener("click", async () => {
 });
 
 $("#known-refresh").addEventListener("click", () => load().catch(fail));
+$("#known-prepare-intel").addEventListener("click", () => prepareIntel().catch(fail));
 $("#known-export").addEventListener("click", async () => {
   try {
     say(await postJson("/api/known/export", { run: requireRun() }));
     await load();
+  } catch (error) {
+    fail(error);
+  }
+});
+$("#known-intel").addEventListener("click", async () => {
+  try {
+    say(await postJson("/api/known/intel", { run: requireRun() }));
   } catch (error) {
     fail(error);
   }
@@ -458,10 +492,35 @@ async function linkKnown(sourceId) {
   }
 }
 
+$("#prepare-intel").addEventListener("click", () => prepareIntel().catch(fail));
 $("#export-packet").addEventListener("click", () => exportPacket().catch(fail));
+$("#open-packet-folder").addEventListener("click", async () => {
+  try {
+    const folder = state.last_packet.review_packet || requireRun() + "/review_packet";
+    await postJson("/api/open-path", { path: folder });
+  } catch (error) {
+    fail(error);
+  }
+});
+
+async function prepareIntel() {
+  const run = requireRun();
+  say("Preparing intelligence packet...");
+  const result = await postJson(`/api/prepare-intel?run=${encodeURIComponent(run)}`, { run });
+  state.last_packet = result;
+  $("#packet-path").textContent = JSON.stringify(result, null, 2);
+  if (result.chatgpt_packet) {
+    const text = await api(`/api/file?path=${encodeURIComponent(result.chatgpt_packet)}`);
+    $("#packet-content").value = text;
+  }
+  showTab("packet");
+  say(`Intelligence packet prepared.\n${JSON.stringify(result, null, 2)}`);
+  await load();
+}
 
 async function exportPacket() {
   const result = await postJson("/api/review-packet", { run: requireRun() });
+  state.last_packet = result;
   $("#packet-path").textContent = JSON.stringify(result, null, 2);
   const text = await api(`/api/file?path=${encodeURIComponent(result.chatgpt_packet)}`);
   $("#packet-content").value = text;

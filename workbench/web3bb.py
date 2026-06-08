@@ -1006,6 +1006,184 @@ def known_export(run_path: Path) -> dict:
     return {"known_csv": str(csv_path), "known_summary": str(md_path), "sources": len(sources)}
 
 
+def known_intel(run_path: Path) -> dict:
+    known_export(run_path)
+    out_dir = run_path / "known_intel"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    sources = known_list(run_path)
+    chunks = known_chunks_for_intel(run_path)
+    hypotheses = [dict(row) for row in list_hypotheses(run_path)]
+    corpus_text = "\n".join([chunk["text"] for chunk in chunks] + [row.get("hypothesis", "") for row in hypotheses])
+
+    contracts = top_terms(re.findall(r"\b[A-Z][A-Za-z0-9_]{3,}\b", corpus_text), exclude={"Code4rena", "Axelar", "Immunefi"})
+    function_matches = re.findall(r"\b(?:function|func|method)\s+([A-Za-z_][A-Za-z0-9_]*)\b|\b([a-z_][A-Za-z0-9_]{2,})\s*\(", corpus_text)
+    functions = top_terms([item for pair in function_matches for item in pair if item])
+    themes = top_terms([term for term in search_terms(corpus_text) if term in known_theme_words()], limit=20)
+    rejected = [row for row in hypotheses if str(row.get("status", "")).startswith("Rejected") or row.get("closure_notes")]
+    overhunted = [term for term, count in themes if count >= 3][:12]
+    negative_space = negative_space_hints(contracts, themes, rejected)
+
+    terms_path = out_dir / "known_issue_terms.csv"
+    with terms_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["kind", "term", "count"])
+        writer.writeheader()
+        for kind, rows in [("contract_or_module", contracts), ("function", functions), ("theme", themes)]:
+            for term, count in rows:
+                writer.writerow({"kind": kind, "term": term, "count": count})
+
+    report_path = out_dir / "known_issue_intel.md"
+    lines = [
+        "# Known Issue Intelligence",
+        "",
+        "## Source Inventory",
+        *[f"- {source.get('title', '')} ({source.get('source_type', '')}; {source.get('fetch_status', '')}; chunks: {source.get('chunk_count', 0)}) {source.get('url') or source.get('file_path') or ''}" for source in sources],
+        "",
+        "## Top Contracts/Modules",
+        *format_count_lines(contracts),
+        "",
+        "## Top Function Names",
+        *format_count_lines(functions),
+        "",
+        "## Known Issue Themes",
+        *format_count_lines(themes),
+        "",
+        "## Prior Rejected/Closed Hypotheses",
+        *( [f"- {row.get('id')}: {row.get('title', '')} ({row.get('status', '')})" for row in rejected] or ["- None"] ),
+        "",
+        "## Overhunted Areas",
+        *( [f"- {term}" for term in overhunted] or ["- None identified"] ),
+        "",
+        "## Negative-Space Hints",
+        *( [f"- {hint}" for hint in negative_space] or ["- Review sparse modules and contracts absent from known issue themes."] ),
+        "",
+        "## Query Pack For ChatGPT",
+        *[f"- {term} {theme}" for term, _ in contracts[:8] for theme, _ in themes[:3]],
+        "",
+    ]
+    report_path.write_text("\n".join(lines), encoding="utf-8")
+    return {"known_intel": str(report_path), "known_terms": str(terms_path), "known_source_count": len(sources)}
+
+
+def prepare_intel(run_path: Path) -> dict:
+    warnings: list[str] = []
+    errors: list[str] = []
+    metadata = read_json(run_path / "metadata" / "run_metadata.json") if (run_path / "metadata" / "run_metadata.json").exists() else {}
+    target = f"{metadata.get('target_name', '')} {metadata.get('program_url', '')}".lower()
+    if "axelar" in target:
+        try:
+            seed_axelar_known_sources(run_path)
+        except Exception as exc:
+            warnings.append(f"Axelar known-source seed warning: {exc}")
+    else:
+        try:
+            index_saved_scope_urls(run_path)
+        except Exception as exc:
+            warnings.append(f"Saved URL indexing warning: {exc}")
+    try:
+        known_dedupe(run_path)
+        known_exports = known_export(run_path)
+        intel = known_intel(run_path)
+        packet = export_review_packet(run_path)
+    except Exception as exc:
+        errors.append(str(exc))
+        raise
+    return {
+        "review_packet": packet.get("review_packet", ""),
+        "chatgpt_packet": packet.get("chatgpt_packet", ""),
+        "known_intel": intel.get("known_intel", ""),
+        "known_terms": intel.get("known_terms", ""),
+        "known_source_count": intel.get("known_source_count", 0),
+        "known_csv": known_exports.get("known_csv", ""),
+        "known_summary": known_exports.get("known_summary", ""),
+        "warnings": warnings,
+        "errors": errors,
+    }
+
+
+def index_saved_scope_urls(run_path: Path) -> None:
+    metadata = read_json(run_path / "metadata" / "run_metadata.json") if (run_path / "metadata" / "run_metadata.json").exists() else {}
+    resources = read_json(run_path / "scope" / "resources.json") if (run_path / "scope" / "resources.json").exists() else {}
+    urls = [metadata.get("program_url", ""), *resources.get("urls", [])]
+    for url in sorted({url for url in urls if url}):
+        known_add_url(run_path, url, "scope", f"Saved scope URL - {url}", "Imported from saved run URLs.")
+
+
+def known_chunks_for_intel(run_path: Path) -> list[dict]:
+    with run_db(run_path) as conn:
+        ensure_run_schema(conn)
+        return [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT c.text, s.title, s.source_type, s.fetch_status
+                FROM known_chunks c
+                JOIN known_sources s ON s.id = c.source_id
+                ORDER BY s.id, c.chunk_index
+                """
+            ).fetchall()
+        ]
+
+
+def top_terms(values: Iterable[str], limit: int = 20, exclude: set[str] | None = None) -> list[tuple[str, int]]:
+    exclude_lower = {item.lower() for item in (exclude or set())}
+    counts: dict[str, int] = {}
+    for value in values:
+        term = str(value).strip()
+        if len(term) < 3 or term.lower() in exclude_lower:
+            continue
+        counts[term] = counts.get(term, 0) + 1
+    return sorted(counts.items(), key=lambda item: (-item[1], item[0].lower()))[:limit]
+
+
+def known_theme_words() -> set[str]:
+    return {
+        "accounting",
+        "authorization",
+        "bridge",
+        "crosschain",
+        "deflationary",
+        "dos",
+        "express",
+        "fee",
+        "gateway",
+        "governance",
+        "interchain",
+        "lock",
+        "manager",
+        "oracle",
+        "reentrancy",
+        "reimbursement",
+        "rounding",
+        "scope",
+        "slippage",
+        "token",
+        "transfer",
+        "unlock",
+        "validation",
+    }
+
+
+def format_count_lines(rows: list[tuple[str, int]]) -> list[str]:
+    return [f"- {term}: {count}" for term, count in rows] or ["- None identified"]
+
+
+def negative_space_hints(
+    contracts: list[tuple[str, int]],
+    themes: list[tuple[str, int]],
+    rejected: list[dict],
+) -> list[str]:
+    hints = []
+    rejected_titles = " ".join(row.get("title", "") for row in rejected).lower()
+    theme_names = {term for term, _ in themes}
+    for contract, _ in contracts[:8]:
+        if contract.lower() not in rejected_titles:
+            hints.append(f"Review {contract} paths not already represented in rejected hypotheses.")
+    for missing in ["authorization", "oracle", "rounding", "validation", "slippage"]:
+        if missing not in theme_names:
+            hints.append(f"Known corpus has little {missing} coverage; check only if in scope and code suggests it.")
+    return hints[:12] or ["No obvious negative-space hints from deterministic term extraction."]
+
+
 def known_dedupe(run_path: Path) -> dict:
     with run_db(run_path) as conn:
         ensure_run_schema(conn)
@@ -1117,6 +1295,8 @@ def export_review_packet(run_path: Path, hypothesis_ids: Iterable[str] | None = 
         Path("metadata") / "profiles.json",
         Path("tracker") / "known_sources.csv",
         Path("tracker") / "known_sources.md",
+        Path("known_intel") / "known_issue_intel.md",
+        Path("known_intel") / "known_issue_terms.csv",
     ]:
         copy_review_file(run_path, packet, rel, included)
 

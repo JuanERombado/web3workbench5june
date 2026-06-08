@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import subprocess
 import zipfile
@@ -19,6 +20,9 @@ from workbench.services import (
     run_mock_tool,
     update_manual_verdict,
 )
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def make_conn(tmp_path):
@@ -324,6 +328,155 @@ def test_web_review_packet_route_exports_packet(tmp_path, monkeypatch):
     assert Path(payload["chatgpt_packet"]).exists()
     assert (run_path / "review_packet" / "tracker" / "tracker.csv").exists()
     assert "Route packet" in Path(payload["chatgpt_packet"]).read_text(encoding="utf-8")
+
+
+def test_known_intel_generation_outputs_report_and_terms(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_path = tmp_path / "run"
+    (run_path / "metadata").mkdir(parents=True)
+    web3bb.write_json(run_path / "metadata" / "run_metadata.json", {"target_name": "Demo", "program_url": ""})
+    web3bb.known_add_manual(
+        run_path,
+        "Bridge audit",
+        "audit",
+        "InterchainTokenService function expressExecute reimbursement accounting transfer token manager.",
+    )
+    web3bb.add_hypothesis(run_path, {"title": "Rejected path", "hypothesis": "Old path", "status": "Rejected - No Impact"})
+
+    result = web3bb.known_intel(run_path)
+
+    report = Path(result["known_intel"])
+    terms = Path(result["known_terms"])
+    assert report.exists()
+    assert terms.exists()
+    text = report.read_text(encoding="utf-8")
+    assert "Source Inventory" in text
+    assert "Query Pack For ChatGPT" in text
+    assert "known_issue_terms.csv" in str(terms)
+
+
+def test_prepare_intel_workflow_exports_packet_and_intel(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_path = tmp_path / "run"
+    (run_path / "metadata").mkdir(parents=True)
+    (run_path / "scope").mkdir()
+    web3bb.write_json(
+        run_path / "metadata" / "run_metadata.json",
+        {"target_name": "Axelar", "program_url": "https://example.com/axelar"},
+    )
+    web3bb.write_json(run_path / "metadata" / "tool_versions.json", {})
+    (run_path / "scope" / "scope_brief.md").write_text("# Scope\n", encoding="utf-8")
+    monkeypatch.setattr(web3bb, "fetch_page_text", lambda url: f"Fetched known source text for {url} express token reimbursement.")
+
+    result = web3bb.prepare_intel(run_path)
+
+    assert Path(result["review_packet"]).exists()
+    assert Path(result["chatgpt_packet"]).exists()
+    assert Path(result["known_intel"]).exists()
+    assert Path(result["known_terms"]).exists()
+    assert result["known_source_count"] >= 8
+    assert result["errors"] == []
+
+
+def test_prepare_intel_cli_command(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_path = tmp_path / "run"
+    (run_path / "metadata").mkdir(parents=True)
+    (run_path / "scope").mkdir()
+    web3bb.write_json(run_path / "metadata" / "run_metadata.json", {"target_name": "Demo", "program_url": ""})
+    web3bb.write_json(run_path / "metadata" / "tool_versions.json", {})
+    (run_path / "scope" / "scope_brief.md").write_text("# Scope\n", encoding="utf-8")
+    web3bb.known_add_manual(run_path, "Manual known", "manual", "Vault withdraw accounting mismatch.")
+
+    completed = subprocess.run(
+        ["python", "-m", "workbench", "prepare-intel", "--run", str(run_path)],
+        capture_output=True,
+        env={**os.environ, "PYTHONPATH": str(REPO_ROOT)},
+        text=True,
+        timeout=60,
+    )
+
+    assert completed.returncode == 0
+    assert "known_issue_intel.md" in completed.stdout
+    assert (run_path / "review_packet" / "chatgpt_packet.md").exists()
+
+
+def test_web_prepare_intel_route_success_with_mocked_backend(tmp_path, monkeypatch):
+    client = TestClient(app)
+    run_path = tmp_path / "run"
+
+    def fake_prepare(path):
+        assert path == run_path
+        return {
+            "review_packet": str(run_path / "review_packet"),
+            "chatgpt_packet": str(run_path / "review_packet" / "chatgpt_packet.md"),
+            "known_intel": str(run_path / "known_intel" / "known_issue_intel.md"),
+            "known_terms": str(run_path / "known_intel" / "known_issue_terms.csv"),
+            "known_source_count": 2,
+            "warnings": [],
+            "errors": [],
+        }
+
+    monkeypatch.setattr(web3bb, "prepare_intel", fake_prepare)
+
+    response = client.post("/api/prepare-intel", json={"run": str(run_path)})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["review_packet"].endswith("review_packet")
+    assert payload["known_source_count"] == 2
+    assert payload["warnings"] == []
+    assert payload["errors"] == []
+
+
+def test_web_prepare_intel_missing_run_returns_400_json():
+    client = TestClient(app)
+
+    response = client.post("/api/prepare-intel", json={})
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Run path is required."
+
+
+def test_dashboard_prepare_intel_ui_uses_correct_endpoint_and_single_dashboard_button():
+    client = TestClient(app)
+
+    html = client.get("/").text
+    js = (Path("workbench") / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert "/api/prepare-intel?run=" in js
+    assert 'id="dashboard-prepare-intel"' in html
+    assert 'id="overview-prepare-intel"' not in html
+    assert html.count("dashboard-prepare-intel") == 1
+
+
+def test_review_packet_includes_known_intel_outputs(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_path = tmp_path / "run"
+    (run_path / "metadata").mkdir(parents=True)
+    (run_path / "scope").mkdir()
+    web3bb.write_json(run_path / "metadata" / "run_metadata.json", {"target_name": "Demo", "program_url": ""})
+    web3bb.write_json(run_path / "metadata" / "tool_versions.json", {})
+    (run_path / "scope" / "scope_brief.md").write_text("# Scope\n", encoding="utf-8")
+    web3bb.known_add_manual(run_path, "Manual known", "manual", "Token transfer accounting mismatch.")
+    web3bb.known_intel(run_path)
+
+    result = web3bb.export_review_packet(run_path)
+    packet = Path(result["review_packet"])
+
+    assert (packet / "known_intel" / "known_issue_intel.md").exists()
+    assert (packet / "known_intel" / "known_issue_terms.csv").exists()
+
+
+def test_open_run_ui_defaults_to_dashboard_overview_not_scope():
+    client = TestClient(app)
+
+    html = client.get("/").text
+    js = (Path("workbench") / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert 'id="run-overview"' in html
+    assert 'showTab("dashboard")' in js
+    assert 'showTab("scope")' not in js
 
 
 def test_known_issue_corpus_import_search_check_and_export(tmp_path, monkeypatch):

@@ -76,6 +76,7 @@ The browser UI includes:
 - Hypotheses page for add/import/gate/close workflows.
 - Known Issues page for local audit/report/docs/GitHub/scope/rejection/manual corpus indexing and duplicate checks.
 - Review Packet page for `review_packet/chatgpt_packet.md` with copy-to-clipboard.
+- Dashboard run overview with a one-click **Prepare Intelligence Packet** workflow.
 
 The app binds to `127.0.0.1` only and uses the existing run folders plus SQLite DB under each run.
 
@@ -279,6 +280,8 @@ web3bb known-list --run runs/my-target/<timestamp>
 web3bb known-search --run runs/my-target/<timestamp> --query "vault withdraw stale oracle"
 web3bb check-known --run runs/my-target/<timestamp> --id H-001
 web3bb known-dedupe --run runs/my-target/<timestamp>
+web3bb known-intel --run runs/my-target/<timestamp>
+web3bb prepare-intel --run runs/my-target/<timestamp>
 web3bb known-export --run runs/my-target/<timestamp>
 ```
 
@@ -309,6 +312,24 @@ web3bb seed-axelar-known --run runs/axelar/<timestamp>
 ```
 
 This fetches and indexes the Immunefi pages, Code4rena reports, and Axelar ITS docs. Deployment/config repositories are added as URL stubs, and closed hypotheses are indexed as rejections.
+
+`known-intel` writes deterministic local intelligence outputs:
+
+- `known_intel/known_issue_intel.md`
+- `known_intel/known_issue_terms.csv`
+
+The report includes source inventory, top contracts/modules, top function names, known issue themes, prior rejected/closed hypotheses, overhunted areas, negative-space hints, and a query pack for ChatGPT.
+
+`prepare-intel` runs the low-friction local workflow:
+
+- seed target-specific known sources when recognized, currently Axelar
+- index saved scope/program URLs for unknown targets
+- dedupe known corpus
+- export known corpus
+- generate known issue intelligence
+- export the ChatGPT review packet
+
+It returns JSON with `review_packet`, `chatgpt_packet`, `known_intel`, `known_terms`, known source count, warnings, and errors.
 
 ### Seed Axelar Sample
 

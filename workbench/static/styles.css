@@ -143,6 +143,45 @@ p {
   margin-bottom: 16px;
 }
 
+.overview-panel {
+  margin-bottom: 16px;
+}
+
+.overview-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(180px, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.overview-grid div,
+.muted-box {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #f7f8f4;
+  padding: 10px;
+}
+
+.overview-grid strong {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 5px;
+}
+
+.overview-grid span {
+  word-break: break-word;
+}
+
+summary {
+  cursor: pointer;
+  font-weight: 750;
+}
+
+details form {
+  margin-top: 14px;
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(240px, 1fr));
