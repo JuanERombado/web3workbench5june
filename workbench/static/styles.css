@@ -155,6 +155,7 @@ p {
 }
 
 .overview-grid div,
+.detail-grid div,
 .muted-box {
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -167,6 +168,29 @@ p {
   color: var(--muted);
   font-size: 12px;
   margin-bottom: 5px;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(220px, 1fr));
+  gap: 10px;
+  margin: 10px 0 12px;
+}
+
+.detail-grid strong {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 5px;
+}
+
+.detail-grid span {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.detail-grid .wide {
+  grid-column: 1 / -1;
 }
 
 .overview-grid span {
@@ -308,6 +332,12 @@ dialog {
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 16px;
+}
+
+#lead-dialog {
+  height: auto;
+  max-height: 90vh;
+  overflow: auto;
 }
 
 dialog::backdrop {

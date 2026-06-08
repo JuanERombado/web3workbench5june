@@ -9,6 +9,7 @@ const state = {
   known_matches: [],
   run_overview: {},
   last_packet: {},
+  selected_hypothesis_id: "",
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -40,8 +41,18 @@ function render() {
   renderKnownTypes();
   renderExecutions();
   renderHypotheses();
+  renderActiveRunLabel();
   renderKnownSources();
   renderKnownResults();
+}
+
+function renderActiveRunLabel() {
+  const overview = state.run_overview || {};
+  const target = overview.target_name || "(none selected)";
+  const run = currentRun.value || "";
+  const label = `Current target: ${escapeHtml(target)}<br>Run: ${escapeHtml(run)}`;
+  $("#active-run-label").innerHTML = label;
+  $("#lead-run-label").innerHTML = label;
 }
 
 function renderRuns() {
@@ -136,6 +147,7 @@ function renderHypotheses() {
       <td class="actions">
         <button type="button" data-gate="${escapeAttr(row.id)}">Gate</button>
         <button type="button" data-close="${escapeAttr(row.id)}">Close</button>
+        <button type="button" data-detail="${escapeAttr(row.id)}">Open</button>
         <button type="button" data-check-known="${escapeAttr(row.id)}">Check Known</button>
         <button type="button" data-view-file="${escapeAttr(currentRun.value + "/hypotheses/" + row.id + ".md")}">MD</button>
       </td>
@@ -150,7 +162,25 @@ function renderHypotheses() {
   document.querySelectorAll("[data-check-known]").forEach((button) => {
     button.addEventListener("click", () => checkKnown(button.dataset.checkKnown));
   });
+  document.querySelectorAll("[data-detail]").forEach((button) => {
+    button.addEventListener("click", () => showHypothesisDetail(button.dataset.detail));
+  });
   bindFileButtons();
+}
+
+async function showHypothesisDetail(id) {
+  const row = await api(`/api/hypotheses/${encodeURIComponent(id)}?run=${encodeURIComponent(requireRun())}`);
+  state.selected_hypothesis_id = id;
+  $("#hypothesis-detail-body").innerHTML = `
+    <div><strong>ID / Title / Status</strong><span>${escapeHtml(row.id)} - ${escapeHtml(row.title)}<br>${escapeHtml(row.status)}</span></div>
+    <div><strong>Contract / Function</strong><span>${escapeHtml(row.contract)}<br>${escapeHtml(row.function)}</span></div>
+    <div class="wide"><strong>Hypothesis</strong><span>${escapeHtml(row.hypothesis)}</span></div>
+    <div class="wide"><strong>Evidence</strong><span>${escapeHtml(row.manual_evidence || row.tool_evidence || "")}</span></div>
+    <div><strong>Scope Mapping</strong><span>${escapeHtml(row.scope_mapping)}</span></div>
+    <div><strong>Impact Mapping</strong><span>${escapeHtml(row.impact_mapping)}</span></div>
+    <div><strong>Next Action</strong><span>${escapeHtml(row.next_action)}</span></div>
+  `;
+  showTab("hypotheses");
 }
 
 function renderKnownTypes() {
@@ -241,6 +271,8 @@ document.querySelectorAll("[data-tab-jump]").forEach((button) => {
 $("#refresh-all").addEventListener("click", () => load().catch(fail));
 $("#dashboard-refresh").addEventListener("click", () => load().catch(fail));
 $("#dashboard-prepare-intel").addEventListener("click", () => prepareIntel().catch(fail));
+$("#overview-new-lead").addEventListener("click", () => openLeadDialog());
+$("#hypotheses-new-lead").addEventListener("click", () => openLeadDialog());
 $("#dashboard-open-folder").addEventListener("click", async () => {
   try {
     await postJson("/api/open-path", { path: requireRun() });
@@ -384,6 +416,88 @@ $("#export-tracker").addEventListener("click", async () => {
     fail(error);
   }
 });
+
+$("#detail-known-check").addEventListener("click", async () => {
+  try {
+    if (!state.selected_hypothesis_id) throw new Error("Open a hypothesis first.");
+    await checkKnown(state.selected_hypothesis_id);
+  } catch (error) {
+    fail(error);
+  }
+});
+$("#detail-gate-poc").addEventListener("click", async () => {
+  try {
+    if (!state.selected_hypothesis_id) throw new Error("Open a hypothesis first.");
+    const result = await postJson("/api/gate-poc", { run: requireRun(), hypothesis_id: state.selected_hypothesis_id });
+    say(result);
+    await load();
+    await showHypothesisDetail(state.selected_hypothesis_id);
+  } catch (error) {
+    fail(error);
+  }
+});
+$("#detail-close").addEventListener("click", async () => {
+  if (!state.selected_hypothesis_id) return fail(new Error("Open a hypothesis first."));
+  await closeHypothesis(state.selected_hypothesis_id);
+});
+$("#detail-export-packet").addEventListener("click", () => exportPacket().catch(fail));
+
+function openLeadDialog() {
+  try {
+    requireRun();
+    renderActiveRunLabel();
+    $("#lead-preview").textContent = "No preview yet.";
+    $("#lead-dialog").showModal();
+  } catch (error) {
+    fail(error);
+  }
+}
+
+$("#lead-cancel").addEventListener("click", () => $("#lead-dialog").close());
+$("#lead-preview-button").addEventListener("click", async () => {
+  const preview = parseLeadPreview($("#lead-paste").value, $("#lead-title-override").value, $("#lead-source").value);
+  $("#lead-preview").textContent = JSON.stringify(preview, null, 2);
+});
+$("#lead-start-button").addEventListener("click", async () => {
+  try {
+    const result = await postJson("/api/import-lead-text", {
+      run: requireRun(),
+      text: $("#lead-paste").value,
+      title_override: $("#lead-title-override").value,
+      source: $("#lead-source").value,
+    });
+    $("#lead-dialog").close();
+    const newId = result.hypothesis_id || result.id;
+    say(`Created ${newId}\n${JSON.stringify(result, null, 2)}`);
+    await load();
+    await showHypothesisDetail(newId);
+  } catch (error) {
+    fail(error);
+  }
+});
+$("#lead-import-file-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    const values = Object.fromEntries(new FormData(event.currentTarget));
+    say(await postJson("/api/import-leads", { run: requireRun(), file_path: values.file_path }));
+    $("#lead-dialog").close();
+    await load();
+  } catch (error) {
+    fail(error);
+  }
+});
+
+function parseLeadPreview(text, titleOverride, source) {
+  const lines = text.trim().split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const preview = { title: titleOverride || lines[0] || "", source: source || "ChatGPT" };
+  const body = text.split(/^##\s+/m).slice(1);
+  for (const section of body) {
+    const [heading, ...rest] = section.split(/\r?\n/);
+    preview[heading.trim().toLowerCase()] = rest.join("\n").trim();
+  }
+  if (!preview.hypothesis && lines.length > 1) preview.hypothesis = lines.slice(1).join("\n");
+  return preview;
+}
 
 $("#known-refresh").addEventListener("click", () => load().catch(fail));
 $("#known-prepare-intel").addEventListener("click", () => prepareIntel().catch(fail));

@@ -64,6 +64,12 @@ class ImportLeadsIn(RunPathIn):
     file_path: str
 
 
+class LeadTextIn(RunPathIn):
+    text: str
+    title_override: str = ""
+    source: str = "ChatGPT"
+
+
 class KnownUrlIn(RunPathIn):
     url: str
     source_type: str
@@ -126,6 +132,20 @@ def bootstrap(run: str = "") -> dict:
         "run_overview": overview_for_run(selected),
         "statuses": web3bb.HYPOTHESIS_STATUSES,
         "known_source_types": web3bb.KNOWN_SOURCE_TYPES,
+    }
+
+
+@app.get("/api/routes")
+def routes() -> dict:
+    return {
+        "routes": sorted(
+            [
+                {"path": route.path, "methods": sorted(getattr(route, "methods", []) or [])}
+                for route in app.routes
+                if hasattr(route, "path")
+            ],
+            key=lambda item: item["path"],
+        )
     }
 
 
@@ -230,6 +250,14 @@ def hypotheses(run: str = Query(...)) -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.get("/api/hypotheses/{hypothesis_id}")
+def hypothesis_detail(hypothesis_id: str, run: str = Query(...)) -> dict:
+    try:
+        return dict(web3bb.get_hypothesis(Path(run), hypothesis_id))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/api/hypotheses")
 def add_hypothesis(payload: HypothesisIn) -> dict:
     try:
@@ -237,6 +265,24 @@ def add_hypothesis(payload: HypothesisIn) -> dict:
         web3bb.export_run(Path(payload.run))
         return dict(row)
     except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/import-lead-text")
+def import_lead_text(payload: dict | None = Body(default=None)) -> dict:
+    data = payload or {}
+    run_path_text = str(data.get("run") or "").strip()
+    text = str(data.get("text") or "").strip()
+    title_override = str(data.get("title_override") or "").strip()
+    source = str(data.get("source") or "ChatGPT").strip() or "ChatGPT"
+    if not run_path_text:
+        raise HTTPException(status_code=400, detail="Run path is required.")
+    if not text:
+        raise HTTPException(status_code=400, detail="Lead text is required.")
+    try:
+        return web3bb.import_lead_text_detail(Path(run_path_text), text, source, title_override)
+    except Exception as exc:
+        logger.exception("import-lead-text failed for run %s", run_path_text)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
@@ -340,6 +386,14 @@ def known_search(payload: KnownSearchIn) -> dict:
 def known_check(payload: CheckKnownIn) -> dict:
     try:
         return web3bb.check_known(Path(payload.run), payload.hypothesis_id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/gate-poc")
+def gate_poc(payload: CheckKnownIn) -> dict:
+    try:
+        return web3bb.gate_poc(Path(payload.run), payload.hypothesis_id)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

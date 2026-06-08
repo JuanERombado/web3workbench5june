@@ -50,6 +50,7 @@
             </div>
             <div id="overview-body" class="overview-grid"></div>
             <div class="button-row">
+              <button id="overview-new-lead" type="button">+ New Lead</button>
               <button data-tab-jump="known" type="button">Known Issues</button>
               <button data-tab-jump="scan" type="button">Scan</button>
               <button data-tab-jump="hypotheses" type="button">Hypotheses</button>
@@ -137,26 +138,41 @@
           <div class="section-head">
             <h2>Hypotheses</h2>
             <div class="button-row">
+              <button id="hypotheses-new-lead" type="button">+ New Lead</button>
               <button id="export-tracker" type="button">Export Tracker</button>
             </div>
           </div>
-          <form id="hypothesis-form" class="panel form-grid">
-            <label>Title <input name="title" required /></label>
-            <label>Contract <input name="contract" /></label>
-            <label>Function <input name="function" /></label>
-            <label>Status <select name="status" id="status-select"></select></label>
-            <label>PoC status <input name="poc_status" value="Needs PoC" /></label>
-            <label>Validation status <input name="validation_status" value="Unvalidated" /></label>
-            <label>Gate decision <input name="gate_decision" /></label>
-            <label>Next action <input name="next_action" /></label>
-            <label class="wide">Hypothesis <textarea name="hypothesis" rows="4"></textarea></label>
-            <label class="wide">Notes <textarea name="notes" rows="3"></textarea></label>
-            <button type="submit">Add Hypothesis</button>
-          </form>
-          <form id="import-form" class="panel inline-form">
-            <label>Lead file path <input name="file_path" placeholder="C:\path\to\leads.csv or leads.md" /></label>
-            <button type="submit">Import Leads</button>
-          </form>
+          <div id="active-run-label" class="panel muted-box"></div>
+          <details class="panel">
+            <summary>Advanced import options</summary>
+            <form id="hypothesis-form" class="form-grid">
+              <label>Title <input name="title" required /></label>
+              <label>Contract <input name="contract" /></label>
+              <label>Function <input name="function" /></label>
+              <label>Status <select name="status" id="status-select"></select></label>
+              <label>PoC status <input name="poc_status" value="Needs PoC" /></label>
+              <label>Validation status <input name="validation_status" value="Unvalidated" /></label>
+              <label>Gate decision <input name="gate_decision" /></label>
+              <label>Next action <input name="next_action" /></label>
+              <label class="wide">Hypothesis <textarea name="hypothesis" rows="4"></textarea></label>
+              <label class="wide">Notes <textarea name="notes" rows="3"></textarea></label>
+              <button type="submit">Add Hypothesis</button>
+            </form>
+            <form id="import-form" class="inline-form">
+              <label>Lead file path <input name="file_path" placeholder="C:\path\to\leads.csv or leads.md" /></label>
+              <button type="submit">Import File</button>
+            </form>
+          </details>
+          <section id="hypothesis-detail" class="panel detail-panel">
+            <h2>Hypothesis Detail</h2>
+            <div id="hypothesis-detail-body" class="detail-grid"></div>
+            <div class="button-row">
+              <button id="detail-known-check" type="button">Run Known Check</button>
+              <button id="detail-gate-poc" type="button">Run PoC Readiness Gate</button>
+              <button id="detail-close" type="button">Close / Reject</button>
+              <button id="detail-export-packet" type="button">Export Review Packet</button>
+            </div>
+          </section>
           <div class="table-wrap">
             <table>
               <thead><tr><th>ID</th><th>Title</th><th>Status</th><th>PoC</th><th>Validation</th><th>Gate</th><th>Next Action</th><th>Actions</th></tr></thead>
@@ -244,6 +260,31 @@
         <button id="close-file-dialog" type="button">Close</button>
       </div>
       <pre id="file-content"></pre>
+    </dialog>
+
+    <dialog id="lead-dialog">
+      <div class="section-head">
+        <h2>New Lead</h2>
+        <button id="lead-cancel" type="button">Cancel</button>
+      </div>
+      <div id="lead-run-label" class="muted-box"></div>
+      <label>Paste lead from ChatGPT <textarea id="lead-paste" rows="14" placeholder="# Title&#10;&#10;## Contract&#10;..."></textarea></label>
+      <div class="form-grid">
+        <label>Optional title override <input id="lead-title-override" /></label>
+        <label>Source <select id="lead-source"><option>ChatGPT</option><option>Manual</option><option>Research Notes</option></select></label>
+      </div>
+      <details class="panel">
+        <summary>Advanced import file</summary>
+        <form id="lead-import-file-form" class="inline-form">
+          <label>CSV/Markdown file path <input name="file_path" placeholder="C:\path\to\leads.md" /></label>
+          <button type="submit">Import File</button>
+        </form>
+      </details>
+      <pre id="lead-preview" class="messages">No preview yet.</pre>
+      <div class="button-row">
+        <button id="lead-preview-button" type="button">Parse Preview</button>
+        <button id="lead-start-button" type="button">Start New Lead</button>
+      </div>
     </dialog>
 
     <script src="/static/app.js"></script>

@@ -243,6 +243,223 @@ Write Foundry test.
     assert rows[0]["next_action"] == "Write Foundry test."
 
 
+def test_parse_pasted_markdown_lead():
+    lead = web3bb.parse_lead_text(
+        """# Reimbursement mismatch
+
+## Contract
+InterchainTokenService
+
+## Function
+expressExecute
+
+## Hypothesis
+Executor reimbursement may mismatch transferred amount.
+
+## Source
+ChatGPT
+
+## Evidence
+Trace note.
+
+## Scope Mapping
+In scope.
+
+## Impact Mapping
+Direct loss of funds.
+
+## Next Action
+Run known check.
+""",
+        default_source="ChatGPT",
+    )
+
+    assert lead["title"] == "Reimbursement mismatch"
+    assert lead["contract"] == "InterchainTokenService"
+    assert lead["function"] == "expressExecute"
+    assert lead["hypothesis"] == "Executor reimbursement may mismatch transferred amount."
+    assert lead["source"] == "ChatGPT"
+    assert lead["manual_evidence"] == "Trace note."
+    assert lead["scope_mapping"] == "In scope."
+    assert lead["impact_mapping"] == "Direct loss of funds."
+    assert lead["next_action"] == "Run known check."
+
+
+def test_parse_plain_text_lead():
+    lead = web3bb.parse_lead_text(
+        "Plain title\nRemaining text becomes the hypothesis and notes.",
+        default_source="ChatGPT",
+    )
+
+    assert lead["title"] == "Plain title"
+    assert lead["hypothesis"] == "Remaining text becomes the hypothesis and notes."
+    assert lead["notes"] == "Remaining text becomes the hypothesis and notes."
+    assert lead["source"] == "ChatGPT"
+
+
+def test_import_lead_text_creates_next_hypothesis_and_exports(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_path = tmp_path / "run"
+    (run_path / "metadata").mkdir(parents=True)
+    web3bb.write_json(run_path / "metadata" / "run_metadata.json", {"target_name": "Demo", "program_url": ""})
+    web3bb.write_json(run_path / "metadata" / "tool_versions.json", {})
+    web3bb.add_hypothesis(run_path, {"title": "Existing", "hypothesis": "First"})
+
+    row = web3bb.import_lead_text(run_path, "# New pasted lead\n\n## Hypothesis\nSecond", source="ChatGPT")
+
+    assert row["id"] == "H-002"
+    assert row["title"] == "New pasted lead"
+    assert (run_path / "hypotheses" / "H-002.md").exists()
+    assert (run_path / "tracker" / "tracker.csv").exists()
+
+
+def test_gate_poc_outputs_checklist(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_path = tmp_path / "run"
+    (run_path / "metadata").mkdir(parents=True)
+    web3bb.write_json(run_path / "metadata" / "run_metadata.json", {"target_name": "Demo", "program_url": ""})
+    row = web3bb.add_hypothesis(
+        run_path,
+        {
+            "title": "Scoped loss",
+            "contract": "Vault",
+            "function": "withdraw",
+            "hypothesis": "Executor drains deployed vault funds.",
+            "scope_mapping": "Vault contract is in scope.",
+            "impact_mapping": "Direct loss of funds.",
+            "next_action": "Use deployed actor config.",
+        },
+    )
+
+    result = web3bb.gate_poc(run_path, row["id"])
+
+    expected_keys = {
+        "scoped_contract_status",
+        "scoped_impact_status",
+        "deployed_actor_status",
+        "known_issue_status",
+        "harness_gap_status",
+        "real_asset_or_config_status",
+        "recommended_next_step",
+    }
+    assert expected_keys <= set(result)
+    assert result["scoped_contract_status"] == "Pass"
+    assert result["scoped_impact_status"] == "Pass"
+    assert result["recommended_next_step"] in {
+        "Ask ChatGPT for trace plan",
+        "Run known check",
+        "Needs scope confirmation",
+        "Needs deployed actor",
+        "Ready for manual PoC planning",
+        "Likely kill/deprioritize",
+    }
+
+
+def test_web_import_lead_text_route(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    client = TestClient(app)
+    run_path = tmp_path / "run"
+    (run_path / "metadata").mkdir(parents=True)
+    web3bb.write_json(run_path / "metadata" / "run_metadata.json", {"target_name": "Demo", "program_url": ""})
+    web3bb.write_json(run_path / "metadata" / "tool_versions.json", {})
+
+    response = client.post(
+        "/api/import-lead-text",
+        json={"run": str(run_path), "text": "# Web lead\n\n## Hypothesis\nCreated from paste.", "source": "ChatGPT"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["hypothesis_id"] == "H-001"
+    assert payload["title"] == "Web lead"
+    assert Path(payload["hypothesis_path"]).exists()
+    assert Path(payload["tracker_csv"]).exists()
+    assert Path(payload["summary"]).exists()
+    assert payload["parsed"]["hypothesis"] == "Created from paste."
+
+
+def test_web_import_lead_text_missing_text_returns_400(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    client = TestClient(app)
+    run_path = tmp_path / "run"
+    (run_path / "metadata").mkdir(parents=True)
+    web3bb.write_json(run_path / "metadata" / "run_metadata.json", {"target_name": "Demo", "program_url": ""})
+
+    response = client.post("/api/import-lead-text", json={"run": str(run_path), "text": ""})
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Lead text is required."
+
+
+def test_web_import_lead_text_missing_run_returns_400(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    client = TestClient(app)
+
+    response = client.post("/api/import-lead-text", json={"text": "A lead"})
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Run path is required."
+
+
+def test_web_imported_lead_can_immediately_gate_poc(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    client = TestClient(app)
+    run_path = tmp_path / "run"
+    (run_path / "metadata").mkdir(parents=True)
+    web3bb.write_json(run_path / "metadata" / "run_metadata.json", {"target_name": "Demo", "program_url": ""})
+    web3bb.write_json(run_path / "metadata" / "tool_versions.json", {})
+
+    imported = client.post(
+        "/api/import-lead-text",
+        json={
+            "run": str(run_path),
+            "text": "# Gateable lead\n\n## Contract\nVault\n\n## Function\nwithdraw\n\n## Hypothesis\nDeployed vault loss of funds.",
+        },
+    ).json()
+    response = client.post("/api/gate-poc", json={"run": str(run_path), "hypothesis_id": imported["hypothesis_id"]})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["hypothesis_id"] == imported["hypothesis_id"]
+    assert "recommended_next_step" in payload
+
+
+def test_routes_debug_includes_import_lead_and_prepare_intel():
+    client = TestClient(app)
+
+    response = client.get("/api/routes")
+
+    assert response.status_code == 200
+    paths = {route["path"] for route in response.json()["routes"]}
+    assert "/api/import-lead-text" in paths
+    assert "/api/prepare-intel" in paths
+
+
+def test_cli_gate_poc_missing_hypothesis_returns_clean_json(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_path = tmp_path / "run"
+    (run_path / "metadata").mkdir(parents=True)
+    web3bb.write_json(run_path / "metadata" / "run_metadata.json", {"target_name": "Demo", "program_url": ""})
+    web3bb.add_hypothesis(run_path, {"title": "Existing", "hypothesis": "First"})
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(REPO_ROOT)
+    result = subprocess.run(
+        ["python", "-m", "workbench", "gate-poc", "--run", str(run_path), "--id", "H-002"],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "Traceback" not in result.stderr
+    assert '"error": "Hypothesis not found: H-002"' in result.stdout
+    assert '"available_ids": [' in result.stdout
+    assert '"H-001"' in result.stdout
+
+
 def test_export_review_packet_collects_review_artifacts(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     run_path = tmp_path / "run"
@@ -353,6 +570,106 @@ def test_known_intel_generation_outputs_report_and_terms(tmp_path, monkeypatch):
     assert "Source Inventory" in text
     assert "Query Pack For ChatGPT" in text
     assert "known_issue_terms.csv" in str(terms)
+
+
+def test_known_intel_excludes_generic_contract_and_function_words(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_path = tmp_path / "run"
+    (run_path / "metadata").mkdir(parents=True)
+    web3bb.write_json(run_path / "metadata" / "run_metadata.json", {"target_name": "Demo", "program_url": ""})
+    web3bb.known_add_manual(
+        run_path,
+        "Noisy notes",
+        "manual",
+        "This Token Error Consider Steps However Impact Medium Service Network Address Amount Result Response cfg address clone returns mapping bytes emit expect new type then async describe it require assert.",
+    )
+
+    result = web3bb.known_intel(run_path)
+    text = Path(result["known_intel"]).read_text(encoding="utf-8")
+
+    blocked_terms = ["- This:", "- Token:", "- Error:", "- Consider:", "- cfg:", "- address:", "- clone:", "- returns:", "- mapping:"]
+    assert not any(term in text for term in blocked_terms)
+
+
+def test_known_intel_counts_real_contract_and_function_declarations(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_path = tmp_path / "run"
+    (run_path / "metadata").mkdir(parents=True)
+    web3bb.write_json(run_path / "metadata" / "run_metadata.json", {"target_name": "Demo", "program_url": ""})
+    web3bb.write_json(
+        run_path / "metadata" / "contracts_index.json",
+        [
+            {
+                "path": "src/RemoteAddressValidator.sol",
+                "declared_contracts": ["RemoteAddressValidator"],
+                "functions_sample": ["validateSender", "setTrustedAddress"],
+            }
+        ],
+    )
+    web3bb.known_add_manual(
+        run_path,
+        "Solidity report",
+        "report",
+        "contract RemoteAddressValidator { function validateSender(address sender) public returns (bool) {} } RemoteAddressValidator.sol calls .setTrustedAddress(",
+    )
+
+    result = web3bb.known_intel(run_path)
+    text = Path(result["known_intel"]).read_text(encoding="utf-8")
+
+    assert "- RemoteAddressValidator:" in text
+    assert "- validateSender:" in text
+    assert "- setTrustedAddress:" in text
+
+
+def test_known_intel_theme_counts_and_examples_are_meaningful(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_path = tmp_path / "run"
+    (run_path / "metadata").mkdir(parents=True)
+    web3bb.write_json(run_path / "metadata" / "run_metadata.json", {"target_name": "Demo", "program_url": ""})
+    web3bb.known_add_manual(
+        run_path,
+        "Theme report",
+        "report",
+        "oracle oracle oracle validation validation transfer accounting. contract OracleValidator { function validateOracle() public {} }",
+    )
+
+    result = web3bb.known_intel(run_path)
+    text = Path(result["known_intel"]).read_text(encoding="utf-8")
+
+    assert "- oracle: 3" in text
+    assert "- validation: 2" in text
+    assert "e.g." in text
+
+
+def test_known_intel_query_pack_uses_sentence_prompts(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_path = tmp_path / "run"
+    (run_path / "metadata").mkdir(parents=True)
+    web3bb.write_json(run_path / "metadata" / "run_metadata.json", {"target_name": "Demo", "program_url": ""})
+    web3bb.write_json(
+        run_path / "metadata" / "contracts_index.json",
+        [
+            {
+                "path": "src/AxelarGateway.sol",
+                "declared_contracts": ["AxelarGateway"],
+                "functions_sample": ["upgrade", "validateContractCall"],
+            }
+        ],
+    )
+    web3bb.known_add_manual(
+        run_path,
+        "Gateway report",
+        "report",
+        "contract AxelarGateway { function upgrade(address implementation) external {} } gateway upgrade validation validation.",
+    )
+
+    result = web3bb.known_intel(run_path)
+    text = Path(result["known_intel"]).read_text(encoding="utf-8")
+    query_section = text.split("## Query Pack For ChatGPT", 1)[1]
+
+    assert "Compare AxelarGateway assumptions" in query_section
+    assert "Trace upgrade call paths" in query_section
+    assert all(len(line.split()) > 5 for line in query_section.splitlines() if line.startswith("- "))
 
 
 def test_prepare_intel_workflow_exports_packet_and_intel(tmp_path, monkeypatch):

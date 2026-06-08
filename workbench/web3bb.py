@@ -489,6 +489,66 @@ def import_leads(run_path: Path, file_path: Path) -> list[sqlite3.Row]:
     return imported
 
 
+def import_lead_text(run_path: Path, text: str, source: str = "ChatGPT", title_override: str = "") -> sqlite3.Row:
+    values = parse_lead_text(text, default_source=source, title_override=title_override)
+    row = add_hypothesis(run_path, values)
+    export_run(run_path)
+    return row
+
+
+def import_lead_text_detail(run_path: Path, text: str, source: str = "ChatGPT", title_override: str = "") -> dict:
+    values = parse_lead_text(text, default_source=source, title_override=title_override)
+    row = add_hypothesis(run_path, values)
+    exports = export_run(run_path)
+    hypothesis_path = run_path / "hypotheses" / f"{row['id']}.md"
+    return {
+        "hypothesis_id": row["id"],
+        "title": row["title"],
+        "hypothesis_path": str(hypothesis_path),
+        "tracker_csv": exports.get("csv", ""),
+        "summary": exports.get("summary", ""),
+        "parsed": values,
+    }
+
+
+def import_lead_text_file(run_path: Path, text_file: Path) -> sqlite3.Row:
+    return import_lead_text(run_path, text_file.read_text(encoding="utf-8"), source="ChatGPT")
+
+
+def parse_lead_text(text: str, default_source: str = "ChatGPT", title_override: str = "") -> dict:
+    cleaned = text.strip()
+    if not cleaned:
+        raise ValueError("Lead text is required.")
+    if re.search(r"(?m)^#\s+.+", cleaned) or re.search(r"(?m)^##\s+.+", cleaned):
+        title, body = split_markdown_leads(cleaned)[0]
+        sections = markdown_sections(body)
+        return normalize_lead_values(
+            {
+                "title": title_override or title,
+                "contract": sections.get("contract", ""),
+                "function": sections.get("function", ""),
+                "hypothesis": sections.get("hypothesis", ""),
+                "source": sections.get("source", default_source),
+                "manual_evidence": sections.get("evidence", ""),
+                "scope_mapping": sections.get("scope mapping", ""),
+                "impact_mapping": sections.get("impact mapping", ""),
+                "next_action": sections.get("next action", ""),
+                "notes": sections.get("notes", ""),
+            }
+        )
+    lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+    title = title_override or lines[0]
+    body = "\n".join(lines[1:]).strip()
+    return normalize_lead_values(
+        {
+            "title": title,
+            "hypothesis": body or title,
+            "source": default_source,
+            "notes": body,
+        }
+    )
+
+
 def parse_csv_leads(file_path: Path) -> list[dict]:
     with file_path.open(newline="", encoding="utf-8-sig") as handle:
         reader = csv.DictReader(handle)
@@ -960,6 +1020,89 @@ def check_known(run_path: Path, hypothesis_id: str) -> dict:
     }
 
 
+def gate_poc(run_path: Path, hypothesis_id: str) -> dict:
+    row = dict(get_hypothesis(run_path, hypothesis_id))
+    known = check_known(run_path, hypothesis_id)
+    text = " ".join(str(row.get(key, "")) for key in row.keys()).lower()
+    result = {
+        "hypothesis_id": hypothesis_id,
+        "scoped_contract_status": scope_status(row.get("scope_mapping", ""), row.get("contract", "")),
+        "scoped_impact_status": impact_status(row.get("impact_mapping", "")),
+        "deployed_actor_status": keyword_status(text, ["deployed", "mainnet", "actor", "executor", "manager", "gateway"]),
+        "known_issue_status": known_status_from_check(known),
+        "harness_gap_status": harness_gap_status(row),
+        "real_asset_or_config_status": keyword_status(text, ["real asset", "scoped asset", "config", "profile", "deployed", "token manager"]),
+    }
+    result["recommended_next_step"] = recommended_poc_next_step(result)
+    note = f"{now_iso()} poc-gate: {result['recommended_next_step']}"
+    update_hypothesis(
+        run_path,
+        hypothesis_id,
+        {
+            "gate_decision": result["recommended_next_step"],
+            "notes": f"{row.get('notes', '').rstrip()}\n{note}".strip(),
+        },
+    )
+    return result
+
+
+def scope_status(scope_mapping: str, contract: str) -> str:
+    text = f"{scope_mapping} {contract}".lower()
+    if any(term in text for term in ["out of scope", "not in scope"]):
+        return "Fail"
+    if any(term in text for term in ["in scope", "scoped", "immunefi", "contract"]):
+        return "Pass"
+    return "Unknown"
+
+
+def impact_status(impact_mapping: str) -> str:
+    text = impact_mapping.lower()
+    if any(term in text for term in ["no impact", "informational", "gas"]):
+        return "Fail"
+    if any(term in text for term in ["loss", "funds", "theft", "drain", "dos", "insolvency", "privilege"]):
+        return "Pass"
+    return "Unknown"
+
+
+def keyword_status(text: str, pass_terms: list[str]) -> str:
+    if any(term in text for term in pass_terms):
+        return "Pass"
+    return "Unknown"
+
+
+def known_status_from_check(known: dict) -> str:
+    if any(match.get("confidence") == "High" for match in known.get("public_known_matches", [])):
+        return "Fail"
+    if known.get("public_known_matches") or known.get("self_history_matches"):
+        return "Unknown"
+    return "Pass"
+
+
+def harness_gap_status(row: dict) -> str:
+    text = " ".join(str(row.get(key, "")) for key in ["poc_status", "validation_status", "next_action", "notes"]).lower()
+    if any(term in text for term in ["poc validated", "harness", "foundry", "test passes"]):
+        return "Pass"
+    if any(term in text for term in ["no poc", "blocked", "too complex"]):
+        return "Fail"
+    return "Unknown"
+
+
+def recommended_poc_next_step(result: dict) -> str:
+    if result["known_issue_status"] == "Fail":
+        return "Likely kill/deprioritize"
+    if result["known_issue_status"] == "Unknown":
+        return "Run known check"
+    if result["scoped_contract_status"] != "Pass" or result["scoped_impact_status"] != "Pass":
+        return "Needs scope confirmation"
+    if result["deployed_actor_status"] != "Pass":
+        return "Needs deployed actor"
+    if result["real_asset_or_config_status"] != "Pass":
+        return "Ask ChatGPT for trace plan"
+    if result["harness_gap_status"] != "Pass":
+        return "Ready for manual PoC planning"
+    return "Ready for manual PoC planning"
+
+
 def link_known_issue(run_path: Path, hypothesis_id: str, source_id: int, notes: str = "") -> dict:
     stamp = now_iso()
     with run_db(run_path) as conn:
@@ -1015,13 +1158,13 @@ def known_intel(run_path: Path) -> dict:
     hypotheses = [dict(row) for row in list_hypotheses(run_path)]
     corpus_text = "\n".join([chunk["text"] for chunk in chunks] + [row.get("hypothesis", "") for row in hypotheses])
 
-    contracts = top_terms(re.findall(r"\b[A-Z][A-Za-z0-9_]{3,}\b", corpus_text), exclude={"Code4rena", "Axelar", "Immunefi"})
-    function_matches = re.findall(r"\b(?:function|func|method)\s+([A-Za-z_][A-Za-z0-9_]*)\b|\b([a-z_][A-Za-z0-9_]{2,})\s*\(", corpus_text)
-    functions = top_terms([item for pair in function_matches for item in pair if item])
-    themes = top_terms([term for term in search_terms(corpus_text) if term in known_theme_words()], limit=20)
+    contracts = extract_contract_terms(run_path, chunks, corpus_text)
+    functions = extract_function_terms(run_path, chunks, corpus_text)
+    themes = extract_theme_terms(chunks)
     rejected = [row for row in hypotheses if str(row.get("status", "")).startswith("Rejected") or row.get("closure_notes")]
-    overhunted = [term for term, count in themes if count >= 3][:12]
-    negative_space = negative_space_hints(contracts, themes, rejected)
+    overhunted = overhunted_areas(chunks, themes, rejected)
+    negative_space = negative_space_hints(run_path, contracts, functions, themes, rejected)
+    query_pack = intel_query_pack(contracts, functions, themes, negative_space)
 
     terms_path = out_dir / "known_issue_terms.csv"
     with terms_path.open("w", newline="", encoding="utf-8") as handle:
@@ -1045,19 +1188,19 @@ def known_intel(run_path: Path) -> dict:
         *format_count_lines(functions),
         "",
         "## Known Issue Themes",
-        *format_count_lines(themes),
+        *format_theme_lines(themes, chunks),
         "",
         "## Prior Rejected/Closed Hypotheses",
         *( [f"- {row.get('id')}: {row.get('title', '')} ({row.get('status', '')})" for row in rejected] or ["- None"] ),
         "",
         "## Overhunted Areas",
-        *( [f"- {term}" for term in overhunted] or ["- None identified"] ),
+        *( overhunted or ["- None identified"] ),
         "",
         "## Negative-Space Hints",
         *( [f"- {hint}" for hint in negative_space] or ["- Review sparse modules and contracts absent from known issue themes."] ),
         "",
         "## Query Pack For ChatGPT",
-        *[f"- {term} {theme}" for term, _ in contracts[:8] for theme, _ in themes[:3]],
+        *( [f"- {query}" for query in query_pack] or ["- Compare current code assumptions against known issue corpus gaps."] ),
         "",
     ]
     report_path.write_text("\n".join(lines), encoding="utf-8")
@@ -1124,6 +1267,125 @@ def known_chunks_for_intel(run_path: Path) -> list[dict]:
         ]
 
 
+def extract_contract_terms(run_path: Path, chunks: list[dict], corpus_text: str) -> list[tuple[str, int]]:
+    candidates: list[str] = []
+    candidates.extend(
+        re.findall(
+            r"\b(?:abstract\s+contract|contract|interface|library)\s+([A-Z][A-Za-z0-9_]*)\b",
+            corpus_text,
+        )
+    )
+    candidates.extend(re.findall(r"\b([A-Z][A-Za-z0-9_]*)\.sol\b", corpus_text))
+    candidates.extend(project_contract_names(run_path))
+    for name in re.findall(r"\b[A-Z][A-Za-z0-9_]{5,}\b", corpus_text):
+        if is_strong_camel_case(name):
+            candidates.append(name)
+    return top_terms(candidates, exclude=contract_stopwords())
+
+
+def extract_function_terms(run_path: Path, chunks: list[dict], corpus_text: str) -> list[tuple[str, int]]:
+    candidates: list[str] = []
+    candidates.extend(re.findall(r"\bfunction\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", corpus_text))
+    candidates.extend(
+        re.findall(
+            r"\b(?:internal|private|public|external)\s+function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(",
+            corpus_text,
+        )
+    )
+    candidates.extend(re.findall(r"\.([A-Za-z_][A-Za-z0-9_]*)\s*\(", corpus_text))
+    candidates.extend(project_function_names(run_path))
+    return top_terms(candidates, exclude=function_stopwords())
+
+
+def extract_theme_terms(chunks: list[dict]) -> list[tuple[str, int]]:
+    text = "\n".join(chunk["text"].lower() for chunk in chunks)
+    counts = []
+    for term in known_theme_words():
+        count = len(re.findall(rf"\b{re.escape(term)}\b", text))
+        if count:
+            counts.append((term, count))
+    return sorted(counts, key=lambda item: (-item[1], item[0]))[:20]
+
+
+def project_contract_names(run_path: Path) -> list[str]:
+    path = run_path / "metadata" / "contracts_index.json"
+    if not path.exists():
+        return []
+    names = []
+    for item in read_json(path):
+        names.extend(item.get("declared_contracts", []))
+        rel_path = item.get("path", "")
+        if rel_path.endswith(".sol"):
+            names.append(Path(rel_path).stem)
+    return names
+
+
+def project_function_names(run_path: Path) -> list[str]:
+    path = run_path / "metadata" / "contracts_index.json"
+    if not path.exists():
+        return []
+    names = []
+    for item in read_json(path):
+        names.extend(item.get("functions_sample", []))
+    return names
+
+
+def is_strong_camel_case(name: str) -> bool:
+    if len(name) < 6 or name in contract_stopwords():
+        return False
+    parts = re.findall(r"[A-Z][a-z0-9]+", name)
+    return len(parts) >= 2
+
+
+def contract_stopwords() -> set[str]:
+    return {
+        "This",
+        "That",
+        "Token",
+        "Error",
+        "Consider",
+        "Steps",
+        "Mitigation",
+        "Recommended",
+        "However",
+        "Impact",
+        "Medium",
+        "File",
+        "FILE",
+        "Service",
+        "Network",
+        "Address",
+        "Amount",
+        "Result",
+        "Response",
+        "Code4rena",
+        "Axelar",
+        "Immunefi",
+    }
+
+
+def function_stopwords() -> set[str]:
+    return {
+        "cfg",
+        "address",
+        "clone",
+        "keccak256",
+        "returns",
+        "mapping",
+        "bytes",
+        "emit",
+        "expect",
+        "new",
+        "type",
+        "then",
+        "async",
+        "describe",
+        "it",
+        "require",
+        "assert",
+    }
+
+
 def top_terms(values: Iterable[str], limit: int = 20, exclude: set[str] | None = None) -> list[tuple[str, int]]:
     exclude_lower = {item.lower() for item in (exclude or set())}
     counts: dict[str, int] = {}
@@ -1167,21 +1429,95 @@ def format_count_lines(rows: list[tuple[str, int]]) -> list[str]:
     return [f"- {term}: {count}" for term, count in rows] or ["- None identified"]
 
 
+def format_theme_lines(rows: list[tuple[str, int]], chunks: list[dict]) -> list[str]:
+    if not rows:
+        return ["- None identified"]
+    lines = []
+    for term, count in rows:
+        lines.append(f"- {term}: {count}")
+        example = first_theme_snippet(term, chunks)
+        if example:
+            lines.append(f"  - e.g. {example}")
+    return lines
+
+
+def first_theme_snippet(term: str, chunks: list[dict]) -> str:
+    for chunk in chunks:
+        text = chunk.get("text", "")
+        if re.search(rf"\b{re.escape(term)}\b", text, flags=re.IGNORECASE):
+            return compact_snippet(text, [term], radius=120)
+    return ""
+
+
+def overhunted_areas(chunks: list[dict], themes: list[tuple[str, int]], rejected: list[dict]) -> list[str]:
+    rejected_text = " ".join(
+        " ".join(str(row.get(key, "")) for key in ("title", "hypothesis", "closure_notes", "notes"))
+        for row in rejected
+    ).lower()
+    lines = []
+    for term, count in themes:
+        if count < 3 or term not in rejected_text:
+            continue
+        report_chunk = next(
+            (
+                chunk
+                for chunk in chunks
+                if chunk.get("source_type") in {"audit", "report", "rejection"}
+                and re.search(rf"\b{re.escape(term)}\b", chunk.get("text", ""), flags=re.IGNORECASE)
+            ),
+            None,
+        )
+        if not report_chunk:
+            continue
+        lines.append(f"- {term}: appears {count} times across known/report history. Example: {compact_snippet(report_chunk['text'], [term], radius=110)}")
+    return lines[:10]
+
+
 def negative_space_hints(
+    run_path: Path,
     contracts: list[tuple[str, int]],
+    functions: list[tuple[str, int]],
     themes: list[tuple[str, int]],
     rejected: list[dict],
 ) -> list[str]:
     hints = []
-    rejected_titles = " ".join(row.get("title", "") for row in rejected).lower()
-    theme_names = {term for term, _ in themes}
-    for contract, _ in contracts[:8]:
-        if contract.lower() not in rejected_titles:
-            hints.append(f"Review {contract} paths not already represented in rejected hypotheses.")
+    rejected_text = " ".join(row.get("title", "") + " " + row.get("hypothesis", "") for row in rejected).lower()
+    known_contract_names = {term for term, _ in contracts}
+    known_function_names = {term for term, _ in functions}
+    for contract in project_contract_names(run_path):
+        if contract not in known_contract_names and contract.lower() not in rejected_text:
+            funcs = ", ".join(project_function_names(run_path)[:4])
+            suffix = f" Key parsed functions: {funcs}." if funcs else ""
+            hints.append(f"Low known-corpus coverage for code module {contract}; inspect current assumptions before PoC work.{suffix}")
+    for function in project_function_names(run_path):
+        if function not in known_function_names and function.lower() not in rejected_text:
+            hints.append(f"Function {function} appears in source parsing but not known issue coverage; review only if reachable and in scope.")
+    theme_names = {term for term, count in themes if count >= 2}
     for missing in ["authorization", "oracle", "rounding", "validation", "slippage"]:
-        if missing not in theme_names:
-            hints.append(f"Known corpus has little {missing} coverage; check only if in scope and code suggests it.")
-    return hints[:12] or ["No obvious negative-space hints from deterministic term extraction."]
+        if missing not in theme_names and any(name for name, _ in contracts):
+            hints.append(f"Known corpus has low {missing} coverage despite parsed modules; check concrete code paths before investing PoC time.")
+    return hints[:12]
+
+
+def intel_query_pack(
+    contracts: list[tuple[str, int]],
+    functions: list[tuple[str, int]],
+    themes: list[tuple[str, int]],
+    negative_space: list[str],
+) -> list[str]:
+    prompts = []
+    top_contracts = [term for term, _ in contracts[:6]]
+    top_functions = [term for term, _ in functions[:6]]
+    top_themes = [term for term, _ in themes[:6]]
+    for contract in top_contracts[:4]:
+        theme = top_themes[0] if top_themes else "known issue"
+        prompts.append(f"Compare {contract} assumptions in current code against prior {theme} findings.")
+    for function in top_functions[:4]:
+        theme = top_themes[1] if len(top_themes) > 1 else "security"
+        prompts.append(f"Trace {function} call paths and confirm whether current behavior differs from audited {theme} assumptions.")
+    for hint in negative_space[:4]:
+        prompts.append(f"Use this negative-space hint to guide review: {hint}")
+    return prompts[:12]
 
 
 def known_dedupe(run_path: Path) -> dict:

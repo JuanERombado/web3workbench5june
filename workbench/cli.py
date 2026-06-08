@@ -90,6 +90,10 @@ def main() -> None:
     import_leads.add_argument("--run", required=True)
     import_leads.add_argument("--file", required=True)
 
+    import_lead_text = subparsers.add_parser("import-lead-text")
+    import_lead_text.add_argument("--run", required=True)
+    import_lead_text.add_argument("--text-file", required=True)
+
     update = subparsers.add_parser("update-hypothesis")
     update.add_argument("--run", required=True)
     update.add_argument("--id", required=True)
@@ -161,6 +165,10 @@ def main() -> None:
     check_known.add_argument("--run", required=True)
     check_known.add_argument("--id", required=True)
 
+    gate_poc = subparsers.add_parser("gate-poc")
+    gate_poc.add_argument("--run", required=True)
+    gate_poc.add_argument("--id", required=True)
+
     seed_known = subparsers.add_parser("seed-axelar-known")
     seed_known.add_argument("--run", required=True)
 
@@ -205,6 +213,10 @@ def main() -> None:
     if args.command_name == "import-leads":
         rows = web3bb.import_leads(Path(args.run), Path(args.file))
         print_json(rows)
+        return
+    if args.command_name == "import-lead-text":
+        row = web3bb.import_lead_text_file(Path(args.run), Path(args.text_file))
+        print_json(dict(row))
         return
     if args.command_name == "update-hypothesis":
         row = web3bb.update_hypothesis(Path(args.run), args.id, update_args(args))
@@ -252,6 +264,20 @@ def main() -> None:
         return
     if args.command_name == "check-known":
         print_json(web3bb.check_known(Path(args.run), args.id))
+        return
+    if args.command_name == "gate-poc":
+        run_path = Path(args.run)
+        try:
+            print_json(web3bb.gate_poc(run_path, args.id))
+        except ValueError as exc:
+            if "Hypothesis not found" not in str(exc):
+                raise
+            print_json(
+                {
+                    "error": str(exc),
+                    "available_ids": [row["id"] for row in web3bb.list_hypotheses(run_path)],
+                }
+            )
         return
     if args.command_name == "seed-axelar-known":
         print_json(web3bb.seed_axelar_known_sources(Path(args.run)))
